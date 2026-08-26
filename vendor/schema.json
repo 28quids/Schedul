@@ -1,0 +1,329 @@
+{
+  "schema_version": "1.0",
+  "notes": "Single source of truth for MEP equipment schedules. Field categories: 'instance' = typed per unit, 'type' = pulled from the equipment library on Model Reference, 'derived' = calculated, never typed. Derived formulas use {Field Name} placeholders resolved to column letters at build time.",
+  "naming": {
+    "convention": "BS EN ISO 19650-2 UK National Annex",
+    "pattern": "{ProjectNumber}-{Originator}-{Volume}-{Level}-{Type}-{Role}-{Number}",
+    "type_code": "SH",
+    "role_code": "M"
+  },
+  "status_codes": [
+    ["S0", "Work in Progress"],
+    ["S1", "Suitable for Coordination"],
+    ["S2", "Suitable for Information"],
+    ["S3", "Suitable for Review and Comment"],
+    ["S4", "Suitable for Stage Approval"],
+    ["A1", "Authorised and Accepted"],
+    ["A2", "Authorised and Accepted"],
+    ["B1", "Partial Sign-off, Accepted with Comments"],
+    ["B2", "Partial Sign-off, Accepted with Comments"]
+  ],
+  "project_fields": [
+    ["Project Name", "text", "Riverside Office Refurbishment"],
+    ["Project Number", "text", "24107"],
+    ["Client", "text", "Riverside Estates Ltd"],
+    ["Site Address", "text", "12 Riverside Way, Leeds, LS1 4AB"],
+    ["Originator Code", "text", "ABC"],
+    ["Volume / System Code", "text", "XX"],
+    ["Level / Location Code", "text", "XX"],
+    ["Architect", "text", "Northern Architecture LLP"],
+    ["Main Contractor", "text", "TBC"],
+    ["RIBA Stage", "text", "Stage 4"],
+    ["Author (Initials)", "text", "AB"],
+    ["Checked By (Initials)", "text", "CD"],
+    ["Approved By (Initials)", "text", "EF"],
+    ["Design Ambient Temperature (degC)", "number", 21],
+    ["LPHW Flow Temperature (degC)", "number", 70],
+    ["LPHW Return Temperature (degC)", "number", 50],
+    ["CHW Flow Temperature (degC)", "number", 6],
+    ["CHW Return Temperature (degC)", "number", 12],
+    ["Specific Heat Capacity of Water (kJ/kgK)", "number", 4.18],
+    ["EN 442 Radiator Exponent (n)", "number", 1.3]
+  ],
+  "equipment_types": [
+    {
+      "code": "MVHR",
+      "number": "0001",
+      "title": "Mechanical Ventilation with Heat Recovery Unit Schedule",
+      "short": "MVHR Units",
+      "instance_fields": [
+        ["Unit Reference", 14, "MVHR-01"],
+        ["Location", 20, "Roof Plant Area"],
+        ["Area Served", 24, "Level 02 Open Plan Office"],
+        ["Supply Airflow (l/s)", 12, 450],
+        ["Extract Airflow (l/s)", 12, 450],
+        ["Supply External Static Pressure (Pa)", 14, 150],
+        ["Extract External Static Pressure (Pa)", 14, 140],
+        ["Total Power Input (W)", 12, 396],
+        ["Summer Bypass", 12, "Yes"],
+        ["Duty / Standby", 12, "Duty"]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Systemair"],
+        ["Length (mm)", 11, 1200],
+        ["Width (mm)", 11, 900],
+        ["Height (mm)", 11, 700],
+        ["Weight (kg)", 11, 145],
+        ["Electrical Supply", 15, "230V/1ph/50Hz"],
+        ["Supply Filter Grade", 14, "ISO ePM1 55%"],
+        ["Extract Filter Grade", 14, "ISO ePM10 50%"],
+        ["Heat Exchanger Type", 16, "Counterflow Plate"],
+        ["Dry Heat Recovery Efficiency (%)", 14, 88],
+        ["Duct Connection Diameter (mm)", 13, 250],
+        ["Sound Power Level Breakout (dB(A))", 13, 52]
+      ],
+      "derived_fields": [
+        ["Total Airflow (l/s)", 12, "={Supply Airflow (l/s)}+{Extract Airflow (l/s)}", "Supply plus extract."],
+        ["Specific Fan Power (W/(l/s))", 14, "={Total Power Input (W)}/{Supply Airflow (l/s)}", "Total power input divided by supply airflow. Check the convention required by your Part L compliance route."]
+      ]
+    },
+    {
+      "code": "AHU",
+      "number": "0002",
+      "title": "Air Handling Unit Schedule",
+      "short": "Air Handling Units",
+      "instance_fields": [
+        ["Unit Reference", 14, "AHU-01"],
+        ["Location", 20, "Level 03 Plantroom"],
+        ["Area Served", 24, "Levels 01-02 Offices"],
+        ["Supply Airflow (l/s)", 12, 2400],
+        ["Extract Airflow (l/s)", 12, 2200],
+        ["Supply External Static Pressure (Pa)", 14, 300],
+        ["Extract External Static Pressure (Pa)", 14, 250],
+        ["Supply Fan Power Input (W)", 13, 2880],
+        ["Extract Fan Power Input (W)", 13, 2420],
+        ["Heating Coil Duty (kW)", 13, 42.5],
+        ["Cooling Coil Total Duty (kW)", 13, 58.0],
+        ["Cooling Coil Sensible Duty (kW)", 13, 44.0],
+        ["Fresh Air Proportion (%)", 12, 100]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Nuaire"],
+        ["Length (mm)", 11, 4200],
+        ["Width (mm)", 11, 1600],
+        ["Height (mm)", 11, 1800],
+        ["Operating Weight (kg)", 12, 1450],
+        ["Electrical Supply", 15, "400V/3ph/50Hz"],
+        ["Casing Class (BS EN 1886)", 15, "T2/TB2/L1/F9"],
+        ["Supply Filter Grade", 14, "ISO ePM1 60%"],
+        ["Extract Filter Grade", 14, "ISO ePM10 50%"],
+        ["Heat Recovery Type", 15, "Thermal Wheel"],
+        ["Heat Recovery Efficiency (%)", 14, 78],
+        ["Sound Power Level Breakout (dB(A))", 13, 68],
+        ["LPHW Coil Connection (mm)", 13, 40],
+        ["CHW Coil Connection (mm)", 13, 50]
+      ],
+      "derived_fields": [
+        ["Total Airflow (l/s)", 12, "={Supply Airflow (l/s)}+{Extract Airflow (l/s)}", "Supply plus extract."],
+        ["Supply SFP (W/(l/s))", 13, "={Supply Fan Power Input (W)}/{Supply Airflow (l/s)}", "Supply fan power divided by supply airflow."],
+        ["Extract SFP (W/(l/s))", 13, "={Extract Fan Power Input (W)}/{Extract Airflow (l/s)}", "Extract fan power divided by extract airflow."],
+        ["Total SFP (W/(l/s))", 13, "=({Supply Fan Power Input (W)}+{Extract Fan Power Input (W)})/{Supply Airflow (l/s)}", "Combined fan power divided by supply airflow, per the usual Part L non-domestic convention."],
+        ["LPHW Flow Rate (l/s)", 13, "={Heating Coil Duty (kW)}/(SETUP_CP*(SETUP_LPHWF-SETUP_LPHWR))", "Coil duty divided by (Cp x delta T) using the LPHW temperatures on the SETUP sheet."],
+        ["CHW Flow Rate (l/s)", 13, "={Cooling Coil Total Duty (kW)}/(SETUP_CP*(SETUP_CHWR-SETUP_CHWF))", "Coil duty divided by (Cp x delta T) using the CHW temperatures on the SETUP sheet."]
+      ]
+    },
+    {
+      "code": "FCU",
+      "number": "0003",
+      "title": "Fan Coil Unit Schedule",
+      "short": "Fan Coil Units",
+      "instance_fields": [
+        ["Unit Reference", 14, "FCU-2-01"],
+        ["Location", 20, "Level 02 Ceiling Void"],
+        ["Room Served", 22, "Meeting Room 2.04"],
+        ["Airflow (l/s)", 12, 180],
+        ["External Static Pressure (Pa)", 14, 60],
+        ["Fan Power Input (W)", 12, 95],
+        ["Fan Speed Setting", 12, "Medium"],
+        ["Heating Duty (kW)", 12, 3.2],
+        ["Cooling Total Duty (kW)", 13, 4.5],
+        ["Cooling Sensible Duty (kW)", 13, 3.6]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Diffusion"],
+        ["Model Length (mm)", 12, 1200],
+        ["Model Width (mm)", 12, 600],
+        ["Model Height (mm)", 12, 280],
+        ["Weight (kg)", 11, 48],
+        ["Electrical Supply", 15, "230V/1ph/50Hz"],
+        ["Filter Grade", 13, "ISO Coarse 60%"],
+        ["Sound Pressure Level at 3m (dB(A))", 14, 34],
+        ["LPHW Connection (mm)", 13, 15],
+        ["CHW Connection (mm)", 13, 15],
+        ["Condensate Connection (mm)", 13, 22]
+      ],
+      "derived_fields": [
+        ["Specific Fan Power (W/(l/s))", 14, "={Fan Power Input (W)}/{Airflow (l/s)}", "Fan power input divided by airflow."],
+        ["LPHW Flow Rate (l/s)", 13, "={Heating Duty (kW)}/(SETUP_CP*(SETUP_LPHWF-SETUP_LPHWR))", "Heating duty divided by (Cp x delta T) from the SETUP sheet."],
+        ["CHW Flow Rate (l/s)", 13, "={Cooling Total Duty (kW)}/(SETUP_CP*(SETUP_CHWR-SETUP_CHWF))", "Cooling duty divided by (Cp x delta T) from the SETUP sheet."],
+        ["Sensible Heat Ratio", 12, "={Cooling Sensible Duty (kW)}/{Cooling Total Duty (kW)}", "Sensible divided by total cooling duty."]
+      ]
+    },
+    {
+      "code": "PUMP",
+      "number": "0004",
+      "title": "Pump Schedule",
+      "short": "Pumps",
+      "instance_fields": [
+        ["Pump Reference", 14, "P-01A"],
+        ["Location", 20, "Level 03 Plantroom"],
+        ["System Served", 22, "LPHW Heating Circuit"],
+        ["Arrangement", 13, "Duty / Standby"],
+        ["Fluid", 13, "Water"],
+        ["Glycol Content (%)", 12, 0],
+        ["Fluid Temperature (degC)", 13, 70],
+        ["Duty Flow Rate (l/s)", 13, 3.6],
+        ["Duty Head (kPa)", 12, 145],
+        ["Absorbed Power (kW)", 12, 0.92]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Grundfos"],
+        ["Pump Type", 16, "Inline Twin Head"],
+        ["Motor Rated Power (kW)", 13, 1.5],
+        ["Motor Efficiency Class", 14, "IE5"],
+        ["Speed Control", 14, "Integrated VSD"],
+        ["Electrical Supply", 15, "400V/3ph/50Hz"],
+        ["Connection Size (mm)", 13, 50],
+        ["Length (mm)", 11, 480],
+        ["Width (mm)", 11, 320],
+        ["Height (mm)", 11, 560],
+        ["Weight (kg)", 11, 62]
+      ],
+      "derived_fields": [
+        ["Duty Head (m)", 12, "={Duty Head (kPa)}/9.81", "Converted from kPa using rho x g for water at 1000 kg/m3."],
+        ["Hydraulic Power (kW)", 13, "={Duty Flow Rate (l/s)}*{Duty Head (kPa)}/1000", "Flow in l/s multiplied by head in kPa gives watts; divided by 1000 for kW."],
+        ["Overall Efficiency (%)", 13, "=100*{Duty Flow Rate (l/s)}*{Duty Head (kPa)}/1000/{Absorbed Power (kW)}", "Hydraulic power divided by absorbed power."],
+        ["Motor Loading (%)", 12, "=100*{Absorbed Power (kW)}/{Motor Rated Power (kW)}", "Absorbed power as a percentage of motor rating. Watch anything above 90%."]
+      ]
+    },
+    {
+      "code": "RAD",
+      "number": "0005",
+      "title": "Radiator Schedule",
+      "short": "Radiators",
+      "instance_fields": [
+        ["Radiator Reference", 14, "RAD-1-01"],
+        ["Location", 20, "Level 01"],
+        ["Room Served", 22, "Reception"],
+        ["Room Design Temperature (degC)", 14, 21],
+        ["Required Heat Output (W)", 13, 1450],
+        ["Valve Type", 14, "TRV and Lockshield"]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Stelrad"],
+        ["Radiator Type", 14, "K2 Double Panel"],
+        ["Length (mm)", 11, 1200],
+        ["Height (mm)", 11, 600],
+        ["Depth (mm)", 11, 100],
+        ["Output at dT50 (W)", 13, 1642],
+        ["Water Content (l)", 12, 6.4],
+        ["Weight (kg)", 11, 32],
+        ["Connection Size (mm)", 13, 15],
+        ["Finish", 14, "RAL 9016 White"]
+      ],
+      "derived_fields": [
+        ["Mean Water Temperature (degC)", 14, "=(SETUP_LPHWF+SETUP_LPHWR)/2", "Average of the LPHW flow and return temperatures on the SETUP sheet."],
+        ["Actual dT (K)", 12, "=(SETUP_LPHWF+SETUP_LPHWR)/2-{Room Design Temperature (degC)}", "Mean water temperature minus room design temperature."],
+        ["Correction Factor", 12, "=(((SETUP_LPHWF+SETUP_LPHWR)/2-{Room Design Temperature (degC)})/50)^SETUP_N", "BS EN 442 output correction, (actual dT / 50) raised to the exponent n."],
+        ["Corrected Output (W)", 13, "={Output at dT50 (W)}*((((SETUP_LPHWF+SETUP_LPHWR)/2-{Room Design Temperature (degC)})/50)^SETUP_N)", "Catalogue output at dT50 multiplied by the correction factor."],
+        ["Output Check", 12, "=IF({Output at dT50 (W)}*((((SETUP_LPHWF+SETUP_LPHWR)/2-{Room Design Temperature (degC)})/50)^SETUP_N)>={Required Heat Output (W)},\"OK\",\"UNDERSIZED\")", "Flags where corrected output fails to meet the required output."],
+        ["Flow Rate (l/s)", 12, "={Required Heat Output (W)}/1000/(SETUP_CP*(SETUP_LPHWF-SETUP_LPHWR))", "Required output divided by (Cp x delta T) across the emitter."]
+      ]
+    },
+    {
+      "code": "EWH",
+      "number": "0006",
+      "title": "Electric Water Heater Schedule",
+      "short": "Electric Water Heaters",
+      "instance_fields": [
+        ["Unit Reference", 14, "EWH-01"],
+        ["Location", 20, "Level 01 Cleaners Cupboard"],
+        ["Fixtures Served", 24, "WC-01 Wash Hand Basins x4"],
+        ["Required Storage Volume (l)", 14, 45],
+        ["Cold Feed Temperature (degC)", 14, 10],
+        ["Stored Water Temperature (degC)", 14, 60]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Heatrae Sadia"],
+        ["Nominal Capacity (l)", 13, 50],
+        ["Element Rating (kW)", 12, 3.0],
+        ["Vented / Unvented", 13, "Unvented"],
+        ["Electrical Supply", 15, "230V/1ph/50Hz"],
+        ["Diameter (mm)", 12, 475],
+        ["Height (mm)", 11, 720],
+        ["Dry Weight (kg)", 12, 22],
+        ["Filled Weight (kg)", 12, 72],
+        ["Standing Heat Loss (kWh/24h)", 14, 1.1],
+        ["Mounting", 14, "Floor Standing"],
+        ["Connection Size (mm)", 13, 15]
+      ],
+      "derived_fields": [
+        ["Temperature Rise (K)", 12, "={Stored Water Temperature (degC)}-{Cold Feed Temperature (degC)}", "Stored temperature minus cold feed temperature."],
+        ["Heat-Up Time (min)", 13, "={Nominal Capacity (l)}*SETUP_CP*({Stored Water Temperature (degC)}-{Cold Feed Temperature (degC)})/({Element Rating (kW)}*60)", "Energy to raise the full stored volume, divided by element rating. Ignores standing losses."],
+        ["Capacity Check", 12, "=IF({Nominal Capacity (l)}>={Required Storage Volume (l)},\"OK\",\"UNDERSIZED\")", "Flags where the selected capacity is below the required storage volume."]
+      ]
+    },
+    {
+      "code": "SUPGRILLE",
+      "number": "0007",
+      "title": "Supply Air Terminal Schedule",
+      "short": "Supply Grilles and Diffusers",
+      "instance_fields": [
+        ["Reference", 14, "SD-2-01"],
+        ["Location", 20, "Level 02"],
+        ["Room Served", 22, "Open Plan Office"],
+        ["Quantity", 10, 6],
+        ["Airflow per Terminal (l/s)", 14, 75],
+        ["Mounting Height (m)", 12, 2.7],
+        ["Pressure Drop (Pa)", 12, 18],
+        ["Noise Level (NR)", 12, 30]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Trox"],
+        ["Terminal Type", 16, "4-Way Square Diffuser"],
+        ["Face Size (mm)", 13, "595 x 595"],
+        ["Neck Size (mm)", 13, 200],
+        ["Free Area (m2)", 12, 0.031],
+        ["Neck Area (m2)", 12, 0.0314],
+        ["Discharge Pattern", 14, "4-Way Horizontal"],
+        ["Damper Type", 14, "Opposed Blade"],
+        ["Material / Finish", 16, "Steel, RAL 9010"]
+      ],
+      "derived_fields": [
+        ["Total Airflow (l/s)", 13, "={Quantity}*{Airflow per Terminal (l/s)}", "Quantity multiplied by airflow per terminal."],
+        ["Face Velocity (m/s)", 13, "={Airflow per Terminal (l/s)}/1000/{Free Area (m2)}", "Airflow per terminal divided by free area."],
+        ["Neck Velocity (m/s)", 13, "={Airflow per Terminal (l/s)}/1000/{Neck Area (m2)}", "Airflow per terminal divided by neck area. Aim below about 3 m/s on occupied-space branches."]
+      ]
+    },
+    {
+      "code": "EXTGRILLE",
+      "number": "0008",
+      "title": "Extract Air Terminal Schedule",
+      "short": "Extract Grilles",
+      "instance_fields": [
+        ["Reference", 14, "EG-2-01"],
+        ["Location", 20, "Level 02"],
+        ["Room Served", 22, "WC Lobby 2.01"],
+        ["Quantity", 10, 2],
+        ["Airflow per Terminal (l/s)", 14, 60],
+        ["Pressure Drop (Pa)", 12, 22],
+        ["Noise Level (NR)", 12, 32]
+      ],
+      "type_fields": [
+        ["Manufacturer", 18, "Trox"],
+        ["Terminal Type", 16, "Eggcrate Grille"],
+        ["Face Size (mm)", 13, "300 x 300"],
+        ["Neck Size (mm)", 13, 200],
+        ["Free Area (m2)", 12, 0.058],
+        ["Neck Area (m2)", 12, 0.0314],
+        ["Damper Type", 14, "Opposed Blade"],
+        ["Material / Finish", 16, "Aluminium, RAL 9010"]
+      ],
+      "derived_fields": [
+        ["Total Airflow (l/s)", 13, "={Quantity}*{Airflow per Terminal (l/s)}", "Quantity multiplied by airflow per terminal."],
+        ["Face Velocity (m/s)", 13, "={Airflow per Terminal (l/s)}/1000/{Free Area (m2)}", "Airflow per terminal divided by free area."],
+        ["Neck Velocity (m/s)", 13, "={Airflow per Terminal (l/s)}/1000/{Neck Area (m2)}", "Airflow per terminal divided by neck area."]
+      ]
+    }
+  ]
+}
