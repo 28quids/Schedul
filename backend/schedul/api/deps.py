@@ -93,6 +93,17 @@ def get_schedule(
 # ------------------------------------------------------------ view models ---
 
 
+def _flatten_retired(stored: Any) -> list[int]:
+    """Retired numbers for display, whichever shape the building stores.
+
+    A flat list means one sequence per building; a dict keyed by volume means
+    per-volume sequences. The UI shows them together.
+    """
+    if isinstance(stored, dict):
+        return sorted({n for numbers in stored.values() for n in numbers})
+    return sorted(stored or [])
+
+
 def _row_count(session: Session, schedule_id: str) -> int:
     """How many rows carry any typed value.
 
@@ -112,8 +123,8 @@ def schedule_view(
     house: HouseStandard,
 ) -> ScheduleOut:
     try:
-        docnum = svc.document_number_for(schedule, scheme)
-        filename = svc.filename_for(schedule, scheme)
+        docnum = svc.document_number_for(schedule, scheme, house=house)
+        filename = svc.filename_for(schedule, scheme, house=house)
     except NamingError:
         docnum, filename = schedule.docnum, ""
 
@@ -165,7 +176,7 @@ def building_view(
         name=building.name,
         label=building.label,
         position=building.position,
-        retired_numbers=list(building.retired_numbers or []),
+        retired_numbers=_flatten_retired(building.retired_numbers),
         schedules=[
             schedule_view(session, s, scheme, house)
             for s in svc.live_schedules(session, building)

@@ -47,7 +47,7 @@ def _content(
     stype = columns_for(schedule, target=target)
 
     try:
-        docnum = svc.document_number_for(schedule, scheme)
+        docnum = svc.document_number_for(schedule, scheme, house=house)
     except NamingError:
         docnum = schedule.docnum
 
@@ -76,9 +76,10 @@ def _content(
 
 
 def _filename(session: Session, schedule: Schedule, org: Organisation) -> str:
-    scheme = svc.naming_scheme_for(session, org.id)
+    house = svc.house_standard_for(session, org.id)
+    scheme = svc.scheme_for(house)
     try:
-        return svc.filename_for(schedule, scheme)
+        return svc.filename_for(schedule, scheme, house=house)
     except NamingError:
         return f"{schedule.code}_{schedule.number}.xlsx"
 
@@ -271,8 +272,8 @@ def register(
         for building in svc.buildings_of(session, project):
             for schedule in svc.live_schedules(session, building):
                 try:
-                    docnum = svc.document_number_for(schedule, scheme)
-                    filename = svc.filename_for(schedule, scheme)
+                    docnum = svc.document_number_for(schedule, scheme, house=house)
+                    filename = svc.filename_for(schedule, scheme, house=house)
                 except NamingError:
                     docnum, filename = schedule.docnum, ""
 

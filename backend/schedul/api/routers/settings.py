@@ -6,7 +6,7 @@ makes a second organisation a profile rather than a fork.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -59,6 +59,17 @@ def update_settings(
         house.volume_lookup = payload.volume_lookup
     if payload.status_codes is not None:
         house.status_codes = [tuple(p) for p in payload.status_codes]
+    if payload.volume_discipline is not None:
+        house.volume_discipline = payload.volume_discipline
+    if payload.numbering_scope is not None:
+        if payload.numbering_scope not in ("building", "building_volume"):
+            raise HTTPException(
+                status_code=400,
+                detail="numbering_scope must be 'building' or 'building_volume'",
+            )
+        house.numbering_scope = payload.numbering_scope
+    if payload.branding is not None:
+        house.branding = payload.branding
 
     if row is None:
         row = HouseStandardRow(organisation_id=org.id)

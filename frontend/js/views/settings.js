@@ -171,18 +171,82 @@ export async function settingsView() {
     'Projects inherit these and may override them individually.'
   ));
 
-  /* ---------------------------------------------------------- volumes --- */
+  /* -------------------------------------------------- numbering scope --- */
+
+  const scope = select(
+    [
+      ['building', 'One sequence per building'],
+      ['building_volume', 'A separate sequence per volume within each building'],
+    ],
+    house.numbering_scope || 'building'
+  );
 
   page.appendChild(card(
-    'Volume codes',
-    table(
-      ['Code', 'Description'],
-      Object.entries(house.volume_lookup).map(([code, label]) =>
-        el('tr', {}, [el('td', { class: 'mono', text: code }), el('td', { text: label })])
-      )
-    ),
-    [],
-    'A schedule type picks its volume from this list, so an AHU is always ventilation.'
+    'How numbers are allocated',
+    el('div', {}, [
+      field('Scope', scope,
+        'Per volume means 5.2-00001 and 5.3-00001 can both exist in the same building. ' +
+        'The volume sits earlier in the pattern, so the document numbers stay distinct.'),
+      el('p', { class: 'help muted', style: 'margin-top:10px' }, [
+        'Changing this affects numbers allocated from now on. Schedules already ' +
+        'numbered keep the numbers they have.',
+      ]),
+    ]),
+    [button('Save', {
+      class: 'btn btn-primary',
+      on: {
+        click: async () => {
+          try {
+            await api.settings.update({ numbering_scope: scope.value });
+            toast('Numbering scope saved', 'ok');
+          } catch (error) { fail(error); }
+        },
+      },
+    })]
+  ));
+
+  /* ---------------------------------------------------------- volumes --- */
+
+  // Volume decides the discipline, because an AHU is always ventilation and
+  // ventilation is always mechanical. Editable, since a practice's own
+  // convention is the one that has to win.
+  const disciplines = { ...(house.volume_discipline || {}) };
+  const volumeRows = Object.entries(house.volume_lookup).map(([code, label]) => {
+    const box = input(disciplines[code] || '', {
+      placeholder: '—',
+      on: { input: (e) => { disciplines[code] = e.target.value.trim().toUpperCase(); } },
+    });
+    return el('tr', {}, [
+      el('td', { class: 'mono', text: code }),
+      el('td', { text: label }),
+      el('td', { style: 'width:90px' }, [box]),
+    ]);
+  });
+
+  page.appendChild(card(
+    'Volumes and discipline',
+    el('div', {}, [
+      table(['Code', 'Description', 'Discipline'], volumeRows),
+      el('p', { class: 'help muted', style: 'margin-top:10px' }, [
+        'A schedule type picks its volume from this list, and the discipline follows ' +
+        'from it. Leave a discipline blank to fall back to the project’s own setting. ' +
+        'A project that sets a discipline explicitly always wins.',
+      ]),
+    ]),
+    [button('Save disciplines', {
+      class: 'btn btn-primary',
+      on: {
+        click: async () => {
+          const cleaned = Object.fromEntries(
+            Object.entries(disciplines).filter(([, v]) => v)
+          );
+          try {
+            await api.settings.update({ volume_discipline: cleaned });
+            toast('Disciplines saved', 'ok');
+          } catch (error) { fail(error); }
+        },
+      },
+    })]
   ));
 
   page.appendChild(card(

@@ -270,8 +270,13 @@ class Schedule(TimestampMixin, Base):
         UniqueConstraint(
             "building_id", "code", "deleted_marker", name="uq_schedule_code_per_building"
         ),
+        # Volume is part of the key so per-volume sequences can coexist:
+        # 5.2-00001 and 5.3-00001 are different documents. With numbering scoped
+        # to the building, every schedule shares one volume slot in practice
+        # because allocation never hands out a duplicate.
         UniqueConstraint(
-            "building_id", "number", "deleted_marker", name="uq_schedule_number_per_building"
+            "building_id", "volume", "number", "deleted_marker",
+            name="uq_schedule_number_per_building",
         ),
     )
 

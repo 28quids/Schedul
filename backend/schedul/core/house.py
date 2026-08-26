@@ -20,6 +20,7 @@ __all__ = [
     "HouseStandard",
     "DEFAULT_STATUS_CODES",
     "DEFAULT_VOLUME_LOOKUP",
+    "DEFAULT_VOLUME_DISCIPLINE",
     "DEFAULT_GENERAL_NOTES",
     "DEFAULT_DESIGN_CONSTANTS",
     "DEFAULT_HOUSE_STYLE",
@@ -43,8 +44,23 @@ DEFAULT_STATUS_CODES: list[tuple[str, str]] = [
 DEFAULT_VOLUME_LOOKUP: dict[str, str] = {
     "5.2": "Above ground drainage",
     "5.3": "Domestic services",
+    "5.4": "Fire suppression",
+    "5.5": "Fuel and gas",
     "5.6": "Heating and cooling",
     "5.7": "Ventilation",
+}
+
+#: Discipline follows the volume: drainage and domestic services are public
+#: health, the rest are mechanical. Seeded from the usual reading of these
+#: Uniclass volumes and editable per organisation, because a practice's own
+#: convention is the one that has to win.
+DEFAULT_VOLUME_DISCIPLINE: dict[str, str] = {
+    "5.2": "P",
+    "5.3": "P",
+    "5.4": "M",
+    "5.5": "M",
+    "5.6": "M",
+    "5.7": "M",
 }
 
 #: Project-level notes. Rendered above the type's own notes in Schedule A2.
@@ -123,6 +139,15 @@ class HouseStandard:
     name: str = "Default house standard"
     naming: dict[str, Any] = _field(default_factory=lambda: _deepcopy(DEFAULT_NAMING))
     volume_lookup: dict[str, str] = _field(default_factory=lambda: dict(DEFAULT_VOLUME_LOOKUP))
+    #: Volume -> discipline. Empty means discipline stays project-scoped.
+    volume_discipline: dict[str, str] = _field(
+        default_factory=lambda: dict(DEFAULT_VOLUME_DISCIPLINE)
+    )
+    #: 'building' gives one sequence per building; 'building_volume' gives a
+    #: separate sequence per volume within each building, so 5.2-00001 and
+    #: 5.3-00001 can coexist. Defaults to 'building', which is what existing
+    #: numbering does, so turning it on is a deliberate choice.
+    numbering_scope: str = "building"
     status_codes: list[tuple[str, str]] = _field(
         default_factory=lambda: list(DEFAULT_STATUS_CODES)
     )
@@ -143,6 +168,20 @@ class HouseStandard:
         """``'5.7'`` -> ``'Ventilation'``, or the code itself if unknown."""
         return self.volume_lookup.get(volume, volume)
 
+    def discipline_for(self, volume: str) -> str | None:
+        """The discipline this volume implies, or None to leave it project-scoped.
+
+        An AHU is always ventilation and ventilation is always mechanical, so
+        the discipline follows the equipment rather than being set per job. A
+        project-level override still wins, because resolution runs
+        schedule -> building -> type -> project -> company.
+        """
+        return self.volume_discipline.get(volume) or None
+
+    @property
+    def numbers_per_volume(self) -> bool:
+        return self.numbering_scope == "building_volume"
+
     def status_description(self, code: str) -> str:
         for c, desc in self.status_codes:
             if c == code:
@@ -154,6 +193,8 @@ class HouseStandard:
             "name": self.name,
             "naming": self.naming,
             "volume_lookup": self.volume_lookup,
+            "volume_discipline": self.volume_discipline,
+            "numbering_scope": self.numbering_scope,
             "status_codes": [list(pair) for pair in self.status_codes],
             "revision_codes": self.revision_codes,
             "house_style": self.house_style,
@@ -170,6 +211,12 @@ class HouseStandard:
             name=data.get("name", "Default house standard"),
             naming=data.get("naming") or _deepcopy(DEFAULT_NAMING),
             volume_lookup=data.get("volume_lookup") or dict(DEFAULT_VOLUME_LOOKUP),
+            volume_discipline=(
+                dict(data["volume_discipline"])
+                if data.get("volume_discipline") is not None
+                else dict(DEFAULT_VOLUME_DISCIPLINE)
+            ),
+            numbering_scope=data.get("numbering_scope", "building"),
             status_codes=[tuple(p) for p in data.get("status_codes", DEFAULT_STATUS_CODES)],
             revision_codes=data.get("revision_codes")
             or {"preliminary": "P{nn}", "published": "C{nn}", "max": 20},

@@ -370,3 +370,9 @@ class HouseStandardIn(BaseModel):
     house_style: dict[str, Any] | None = None
     volume_lookup: dict[str, str] | None = None
     status_codes: list[list[str]] | None = None
+    #: Volume -> discipline. An empty dict clears it, leaving discipline
+    #: project-scoped; omitting the field leaves it as it was.
+    volume_discipline: dict[str, str] | None = None
+    #: 'building' or 'building_volume'.
+    numbering_scope: str | None = None
+    branding: dict[str, Any] | None = None

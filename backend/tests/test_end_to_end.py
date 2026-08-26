@@ -627,3 +627,129 @@ class TestRegisterAndRooms:
         for key in ("project_name", "project_number", "building", "code",
                     "document_number", "file_name", "status", "revision"):
             assert key in row
+
+
+class TestNumberingRules:
+    """P2.15: discipline from volume, and optional per-volume sequences."""
+
+    def set_house(self, client, **changes):
+        return client.put("/api/settings", json=changes)
+
+    def test_discipline_follows_the_volume(self, client, project):
+        """MVHR is ventilation so mechanical; EWH is domestic services so
+        public health. Neither is set on the project."""
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "EWH"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        by_code = {
+            s["code"]: s["docnum"]
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        }
+        assert "-5_7-" in by_code["MVHR"] and "-M-" in by_code["MVHR"]
+        assert "-5_3-" in by_code["EWH"] and "-P-" in by_code["EWH"]
+
+    def test_a_project_override_still_wins_over_the_volume(self, client, project):
+        """Resolution is schedule > building > type > project, so a project that
+        needs one discipline throughout can still say so."""
+        client.put(f"/api/projects/{project['id']}", json={
+            "name": project["name"], "number": project["number"],
+            "client": project["client"], "riba_stage": "Stage 4",
+            "naming_overrides": {"discipline": "E"},
+        })
+        building = project["buildings"][0]["id"]
+        client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "EWH"},
+        )
+        docnum = client.get(f"/api/projects/{project['id']}").json()[
+            "buildings"][0]["schedules"][0]["docnum"]
+        assert "-E-" in docnum and "-P-" not in docnum
+
+    def test_clearing_the_lookup_leaves_discipline_project_scoped(self, client, project):
+        self.set_house(client, volume_discipline={})
+        building = project["buildings"][0]["id"]
+        client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "EWH"},
+        )
+        docnum = client.get(f"/api/projects/{project['id']}").json()[
+            "buildings"][0]["schedules"][0]["docnum"]
+        assert "-M-" in docnum, "falls back to the project token"
+
+    def test_numbering_is_per_building_by_default(self, client, project):
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "EWH", "AHU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        numbers = [
+            s["number"]
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        ]
+        assert numbers == [10, 11, 12], "one sequence, whatever the volume"
+
+    def test_per_volume_numbering_gives_each_volume_its_own_sequence(
+        self, client, project
+    ):
+        self.set_house(client, numbering_scope="building_volume")
+        building = project["buildings"][0]["id"]
+        # MVHR and AHU are 5.7; EWH is 5.3.
+        for code in ("MVHR", "EWH", "AHU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        by_code = {
+            s["code"]: s
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        }
+        assert by_code["MVHR"]["number"] == 10
+        assert by_code["AHU"]["number"] == 11, "second in the 5.7 sequence"
+        assert by_code["EWH"]["number"] == 10, "5.3 starts its own sequence"
+        assert by_code["MVHR"]["docnum"] != by_code["EWH"]["docnum"]
+
+    def test_a_retired_number_is_scoped_to_its_volume(self, client, project):
+        self.set_house(client, numbering_scope="building_volume")
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "AHU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        schedules = client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        ahu = [s for s in schedules if s["code"] == "AHU"][0]
+        client.delete(f"/api/projects/{project['id']}/schedules/{ahu['id']}")
+
+        # 11 is retired in 5.7, so another ventilation type gets 12...
+        client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "SUPGRILLE"},
+        )
+        # ...but 5.3 is untouched and still starts at 10.
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "EWH"},
+        ).json()
+        by_code = {s["code"]: s["number"] for s in result["buildings"][0]["schedules"]}
+        assert by_code["SUPGRILLE"] == 12
+        assert by_code["EWH"] == 10
+
+    def test_the_start_number_is_configurable(self, client, project):
+        """Numbering can begin at 1 without a code change."""
+        settings = client.get("/api/settings").json()["house_standard"]
+        naming = settings["naming"]
+        naming["tokens"]["number"]["start"] = 1
+        self.set_house(client, naming=naming)
+
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        schedule = result["buildings"][0]["schedules"][0]
+        assert schedule["number"] == 1
+        assert "-00000001-" in schedule["docnum"]
