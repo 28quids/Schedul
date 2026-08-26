@@ -228,3 +228,30 @@ multi-building, clone-with-checklist, retired numbers not being reused, volume
 following the type, the issued-document lock, and **steps 20 and 21** (the notes
 block and the revision ordering both v1 implementations get wrong) — are all
 still exactly the right tests.
+
+---
+
+## Consequences worth recording
+
+**SPEC.md 4.3.1's promotion trap evaporates.** The spec devotes a section to
+what happens when a single-building job gains a second building: building 1's
+files must move from `Schedules\` down into `Schedules\<ref>\`, which needs
+`promote_to_multi_building`, a dry run, lock detection and a
+`demote_to_single_building` for the mistaken case. None of that is needed now.
+Files are generated on demand into an export folder, so adding a building is one
+row. The folder convention still governs **export layout** — a single-building
+project exports flat, a multi-building one exports into per-building folders —
+but that is decided at export time from current data, not migrated.
+
+**Renaming a building ref stops being a cascade.** SPEC.md 5.3 makes it a mass
+rename across every schedule in that building: write `Config!$B$4`, `os.replace`
+the file, restore from `.bak` on failure, rewrite MAINPROJECTINFO. Now the
+document number is derived from the tokens whenever it is needed, so changing a
+ref is one field. The plan preview is kept anyway, because the user still wants
+to see which documents change identity before consenting — that was always the
+valuable half.
+
+**The issued-document lock matters more, not less.** With renaming this cheap,
+the only thing stopping someone silently changing the identity of a document
+already issued to a client is the lock in SPEC.md 5.5. It is enforced in
+`core/numbering.py`, not in the UI.
