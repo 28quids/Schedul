@@ -89,6 +89,7 @@ export const api = {
       request('POST', `/api/projects/${id}/buildings/${bid}/renumber`, body),
     audit: (id, bid) => request('GET', `/api/projects/${id}/buildings/${bid}/audit`),
 
+    bulkRevision: (id, body) => request('POST', `/api/projects/${id}/revisions/bulk`, body),
     columns: (id, code) => request('GET', `/api/projects/${id}/columns/${code}`),
     setColumns: (id, body) => request('PUT', `/api/projects/${id}/columns`, body),
   },
@@ -111,6 +112,11 @@ export const api = {
     updateRevision: (id, rid, body) =>
       request('PUT', `/api/schedules/${id}/revisions/${rid}`, body),
     deleteRevision: (id, rid) => request('DELETE', `/api/schedules/${id}/revisions/${rid}`),
+    issueRevision: (id, rid) =>
+      request('POST', `/api/schedules/${id}/revisions/${rid}/issue`),
+    snapshot: (id, rid) => request('GET', `/api/schedules/${id}/revisions/${rid}/snapshot`),
+    diff: (id, rid, against) =>
+      request('GET', `/api/schedules/${id}/revisions/${rid}/diff${against ? `?against=${against}` : ''}`),
   },
 
   catalogue: {

@@ -243,6 +243,28 @@ class RevisionOut(RevisionIn):
     position: int
     sort_key: int
     is_current: bool = False
+    #: True once the revision has been issued and its state frozen.
+    issued: bool = False
+    issued_at: _dt.datetime | None = None
+
+
+class BulkRevisionIn(BaseModel):
+    """Append the same revision to many schedules at once.
+
+    Each schedule continues its own series rather than being forced to a shared
+    code, so a schedule already at P03 goes to P04 while one at P01 goes to P02.
+    """
+
+    schedule_ids: list[str] = Field(default_factory=list)
+    status: str = ""
+    issue_date: _dt.date | None = None
+    prepared_by: str = ""
+    checked_by: str = ""
+    approved_by: str = ""
+    description: str = ""
+    published: bool = False
+    issue: bool = False
+    apply: bool = False
 
 
 # -------------------------------------------------------------- equipment ---

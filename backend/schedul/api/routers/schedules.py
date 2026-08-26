@@ -19,6 +19,7 @@ from ...services.converters import (
     type_from_row,
 )
 from ...services.columns import columns_for
+from ...services.issue import diff_snapshots, issue_revision
 from ...services.grid import build_grid, editable_payload, override_payload
 from ..deps import current_org, get_db, get_schedule, schedule_view
 from ...core.references import fill_series
@@ -304,6 +305,8 @@ def _revision_views(schedule: Schedule) -> list[RevisionOut]:
             # Ranked by series then number, so a published C-revision is current
             # even when a preliminary row was entered after it.
             is_current=bool(latest_code) and r.code == latest_code,
+            issued=r.snapshot is not None,
+            issued_at=r.issued_at,
         )
         for r in schedule.revisions
     ]
@@ -347,6 +350,97 @@ def add_revision(
     return _revision_views(schedule)
 
 
+@router.post(
+    "/{schedule_id}/revisions/{revision_id}/issue", response_model=list[RevisionOut]
+)
+def issue(
+    revision_id: str,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> list[RevisionOut]:
+    """Freeze this revision: record what the schedule says right now.
+
+    From here the revision renders from its snapshot, so a later library
+    correction or formula fix cannot change what an issued document said.
+    """
+    revision = session.get(RevisionRow, revision_id)
+    if revision is None or revision.schedule_id != schedule.id:
+        raise HTTPException(status_code=404, detail="no such revision")
+    issue_revision(session, schedule, revision, org)
+    session.expire(schedule, ["revisions"])
+    return _revision_views(schedule)
+
+
+@router.get("/{schedule_id}/revisions/{revision_id}/snapshot")
+def read_snapshot(
+    revision_id: str,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    """What the schedule looked like when this revision was issued."""
+    revision = session.get(RevisionRow, revision_id)
+    if revision is None or revision.schedule_id != schedule.id:
+        raise HTTPException(status_code=404, detail="no such revision")
+    if revision.snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"revision {revision.code} has not been issued, so there is no frozen "
+                f"copy of it. It reflects the schedule as it stands now."
+            ),
+        )
+    return {"code": revision.code, "issued_at": revision.issued_at, **revision.snapshot}
+
+
+@router.get("/{schedule_id}/revisions/{revision_id}/diff")
+def compare_revisions(
+    revision_id: str,
+    against: str | None = None,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Compare an issued revision with another, or with the schedule as it stands.
+
+    Comparing the computed values rather than the typed ones is deliberate: a
+    duty that moved because the library was corrected is a real change to
+    whoever reads the document, even though nobody retyped anything.
+    """
+    from ...services.issue import take_snapshot
+
+    revision = session.get(RevisionRow, revision_id)
+    if revision is None or revision.schedule_id != schedule.id:
+        raise HTTPException(status_code=404, detail="no such revision")
+    if revision.snapshot is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"revision {revision.code} was never issued, so there is nothing to compare",
+        )
+
+    if against:
+        other = session.get(RevisionRow, against)
+        if other is None or other.schedule_id != schedule.id:
+            raise HTTPException(status_code=404, detail="no such revision to compare with")
+        if other.snapshot is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"revision {other.code} was never issued",
+            )
+        later, earlier = (
+            (other, revision) if other.sort_key >= revision.sort_key else (revision, other)
+        )
+        return {
+            "from": earlier.code, "to": later.code,
+            **diff_snapshots(earlier.snapshot, later.snapshot),
+        }
+
+    return {
+        "from": revision.code, "to": "now (unissued)",
+        **diff_snapshots(revision.snapshot, take_snapshot(session, schedule, org)),
+    }
+
+
 @router.put("/{schedule_id}/revisions/{revision_id}", response_model=list[RevisionOut])
 def update_revision(
     revision_id: str,
@@ -357,6 +451,14 @@ def update_revision(
     revision = session.get(RevisionRow, revision_id)
     if revision is None or revision.schedule_id != schedule.id:
         raise HTTPException(status_code=404, detail="no such revision")
+    if revision.snapshot is not None and payload.code != revision.code:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"revision {revision.code} has been issued, so its code is fixed. "
+                f"Everything else about it can still be corrected."
+            ),
+        )
     revision.code = payload.code
     revision.status = payload.status
     revision.issue_date = payload.issue_date
@@ -379,6 +481,15 @@ def delete_revision(
     revision = session.get(RevisionRow, revision_id)
     if revision is None or revision.schedule_id != schedule.id:
         raise HTTPException(status_code=404, detail="no such revision")
+    if revision.snapshot is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"revision {revision.code} has been issued. Deleting it would remove the "
+                f"only record of what that document said; supersede it with a new "
+                f"revision instead."
+            ),
+        )
     session.delete(revision)
     session.flush()
     session.expire(schedule, ["revisions"])

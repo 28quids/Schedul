@@ -121,6 +121,8 @@ class ScheduleContent:
         building_name: str = "",
         rows: Sequence[dict[str, Any]] = (),
         overrides: Sequence[dict[str, Any]] = (),
+        computed: Sequence[dict[str, Any]] = (),
+        frozen: bool = False,
         revisions: Sequence[Revision] = (),
         products: Sequence[dict[str, Any]] = (),
         doc_type: str = "SC",
@@ -136,6 +138,12 @@ class ScheduleContent:
         self.building_name = building_name
         self.rows = list(rows)
         self.overrides = list(overrides)
+        #: Library and derived values as they were when a revision was issued.
+        self.computed = list(computed)
+        #: A frozen export writes those values literally instead of formulas.
+        #: A formula would recompute against today's library, which is exactly
+        #: what an issued document must not do.
+        self.frozen = frozen
         #: 'xlsx' keeps the editing colours so the file stays workable; 'pdf'
         #: uses the issue theme, because an issued document should not look like
         #: somebody's editing screen.
@@ -152,6 +160,9 @@ class ScheduleContent:
 
     def overrides_for(self, index: int) -> dict[str, Any]:
         return self.overrides[index] if index < len(self.overrides) else {}
+
+    def computed_for(self, index: int) -> dict[str, Any]:
+        return self.computed[index] if index < len(self.computed) else {}
 
     @property
     def branding(self) -> dict[str, Any]:
@@ -601,6 +612,8 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
             sc.cell(r0, i).fill = fill_in
 
         for j, col in enumerate(library):
+            if content.frozen:
+                continue  # written literally below, from the snapshot
             lc = get_column_letter(2 + j)
             c = sc.cell(r0, typ_start + j)
             lookup = (
@@ -616,6 +629,8 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
             c.font = font_pull
 
         for j, col in enumerate(derived):
+            if content.frozen:
+                continue  # written literally below, from the snapshot
             c = sc.cell(r0, der_start + j)
             node = parsed.get(col.legacy_name)
             if node is None:
@@ -650,6 +665,18 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
             if col.legacy_name in row_overrides:
                 cell = sc.cell(r0, typ_start + j, row_overrides[col.legacy_name])
                 cell.font = st.f_in if not issue else st.f_sm
+
+        # A frozen export carries what the document said, not what a formula
+        # would say today.
+        if content.frozen:
+            snapshot = content.computed_for(k)
+            for j, col in enumerate(library):
+                if col.legacy_name not in row_overrides:
+                    sc.cell(r0, typ_start + j, snapshot.get(col.legacy_name)).font = font_pull
+            for j, col in enumerate(derived):
+                cell = sc.cell(r0, der_start + j, snapshot.get(col.legacy_name))
+                cell.font = st.f_calc
+                cell.number_format = "0.00"
 
     if not content.rows:
         for i, col in enumerate(inputs, start=1):

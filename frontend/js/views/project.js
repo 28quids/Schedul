@@ -14,11 +14,13 @@ import {
 let state = { project: null, buildingId: null, tab: 'schedules' };
 
 export async function projectView(projectId) {
-  const [project, catalogue] = await Promise.all([
+  const [project, catalogue, meta] = await Promise.all([
     api.projects.read(projectId),
     api.catalogue.list(),
+    api.catalogue.meta().catch(() => ({ status_codes: [] })),
   ]);
   store.catalogue = catalogue;
+  const statuses = (meta.status_codes || []).map(([c, d]) => `${c} - ${d}`);
 
   const keepBuilding =
     state.project && state.project.id === projectId &&
@@ -27,6 +29,7 @@ export async function projectView(projectId) {
   state = {
     project,
     catalogue,
+    statuses,
     buildingId: keepBuilding ? state.buildingId : (project.buildings[0] || {}).id,
     tab: state.project && state.project.id === projectId ? state.tab : 'schedules',
   };
@@ -74,6 +77,10 @@ function draw() {
               on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=pdf`) },
             })
           : null,
+        button('Issue a revision…', {
+          title: 'Append the next revision across several schedules at once',
+          on: { click: () => bulkRevision() },
+        }),
         button('MAINPROJECTINFO', {
           title: 'The master setup and read document, as a workbook',
           on: { click: () => download(`/api/projects/${p.id}/projectinfo.xlsx`) },
@@ -432,6 +439,111 @@ async function deleteBuilding() {
   if (!ok) return;
   try {
     await api.projects.deleteBuilding(state.project.id, b.id);
+    await reload();
+  } catch (error) { fail(error); }
+}
+
+/* ------------------------------------------------------- bulk revision --- */
+
+// Bumping every schedule on a job by hand means opening each one. Each schedule
+// still continues its own series, because two schedules are rarely at the same
+// revision and forcing them level would misstate history.
+async function bulkRevision() {
+  const p = state.project;
+  const all = p.buildings.flatMap((b) =>
+    b.schedules.map((s) => ({ ...s, building: b.ref, buildings: p.buildings.length }))
+  );
+  if (!all.length) {
+    fail(new Error('This project has no schedules yet.'));
+    return;
+  }
+
+  const chosen = new Set(all.map((s) => s.id));
+  const status = select(
+    (state.statuses || ['S2 - Suitable for Information']),
+    'S2 - Suitable for Information'
+  );
+  const date = el('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+  const description = input('', { placeholder: 'Stage 4 issue' });
+  const published = el('input', { type: 'checkbox' });
+  const freeze = el('input', { type: 'checkbox', checked: true });
+  const planBox = el('div', { style: 'margin-top:14px' });
+
+  const payload = () => ({
+    schedule_ids: [...chosen],
+    status: status.value,
+    issue_date: date.value || null,
+    description: description.value,
+    published: published.checked,
+    issue: freeze.checked,
+  });
+
+  const preview = async () => {
+    clear(planBox);
+    if (!chosen.size) return;
+    try {
+      const result = await api.projects.bulkRevision(p.id, payload());
+      planBox.appendChild(table(
+        ['Schedule', 'Building', 'From', 'To'],
+        result.changes.map((c) => el('tr', {}, [
+          el('td', {}, [el('strong', { text: c.code }),
+            el('div', { class: 'muted tiny', text: c.title })]),
+          el('td', { class: 'tiny', text: c.building }),
+          el('td', { class: 'tiny muted', text: c.from }),
+          el('td', {}, [pill(c.to, 'blue')]),
+        ]))
+      ));
+    } catch (error) { fail(error); }
+  };
+
+  const toggle = (schedule, node) => {
+    if (chosen.has(schedule.id)) chosen.delete(schedule.id);
+    else chosen.add(schedule.id);
+    node.classList.toggle('on', chosen.has(schedule.id));
+    preview();
+  };
+
+  // See showDiff: the preview must be requested before awaiting the dialog.
+  const closed = modal({
+    title: 'Issue a revision across the project',
+    wide: true,
+    render: () => el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'Each schedule continues its own series, so one already at P02 goes to P03 while ' +
+        'one at P01 goes to P02.',
+      ]),
+      el('div', { class: 'chips', style: 'margin-bottom:14px' }, all.map((s) => {
+        const chip = el('button', { class: 'chip on' }, [
+          s.buildings > 1 ? `${s.building} · ${s.code}` : s.code,
+        ]);
+        chip.addEventListener('click', () => toggle(s, chip));
+        return chip;
+      })),
+      el('div', { class: 'grid-2' }, [
+        field('Suitability status', status),
+        field('Date', date),
+      ]),
+      el('div', { style: 'margin-top:12px' }, [field('Description', description)]),
+      el('label', { class: 'tiny', style: 'display:flex;gap:6px;margin-top:12px;align-items:center' }, [
+        published, 'Published revision (C) rather than preliminary (P)',
+      ]),
+      el('label', { class: 'tiny', style: 'display:flex;gap:6px;margin-top:6px;align-items:center' }, [
+        freeze, 'Issue them straight away, freezing what each schedule says now',
+      ]),
+      planBox,
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button('Apply', { class: 'btn btn-primary', on: { click: () => close(true) } }),
+    ],
+  });
+
+  preview();
+  const ok = await closed;
+  if (!ok || !chosen.size) return;
+  try {
+    const result = await api.projects.bulkRevision(p.id, { ...payload(), apply: true });
+    toast(`${result.applied} schedule(s) revised`, 'ok');
     await reload();
   } catch (error) { fail(error); }
 }

@@ -123,6 +123,66 @@ def export_schedule_pdf(
     return FileResponse(produced, filename=produced.name, media_type="application/pdf")
 
 
+@router.get("/schedules/{schedule_id}/revisions/{revision_id}/export.xlsx")
+def export_issued_revision(
+    revision_id: str,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> FileResponse:
+    """Re-issue exactly what went out, from the snapshot rather than live data."""
+    from ...core.catalogue import Column, ScheduleType
+    from ...db.models import RevisionRow
+
+    revision = session.get(RevisionRow, revision_id)
+    if revision is None or revision.schedule_id != schedule.id:
+        raise not_found("revision")
+    if revision.snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"revision {revision.code} was never issued, so there is no frozen copy",
+        )
+
+    snap = revision.snapshot
+    house = svc.house_standard_for(session, org.id)
+    house.general_notes = list(snap.get("notes") or [])
+
+    stype = ScheduleType(
+        code=snap.get("type_code", schedule.code),
+        title=snap.get("type_title", schedule.code),
+        version=snap.get("type_version", 1),
+        columns=[Column.from_dict(c) for c in snap.get("columns", [])],
+        notes=[],
+    )
+
+    content = ScheduleContent(
+        schedule_type=stype,
+        house=house,
+        project_fields=snap.get("project_fields") or {},
+        design_constants=snap.get("design_constants") or {},
+        docnum=snap.get("docnum", ""),
+        building_ref=str(snap.get("building", "")).split(" - ")[0],
+        building_name=(
+            str(snap.get("building", "")).split(" - ", 1)[1]
+            if " - " in str(snap.get("building", "")) else ""
+        ),
+        rows=[r.get("values", {}) for r in snap.get("rows", [])],
+        overrides=[r.get("overrides", {}) for r in snap.get("rows", [])],
+        computed=[r.get("computed", {}) for r in snap.get("rows", [])],
+        frozen=True,
+        revisions=revisions_of(schedule),
+        theme="pdf",
+    )
+
+    tmp = Path(tempfile.mkdtemp(prefix="schedul-rev-"))
+    name = f"{snap.get('docnum') or schedule.code}_{revision.code}.xlsx"
+    path = render_schedule(content, tmp / name)
+    return FileResponse(
+        path, filename=name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @router.get("/projects/{project_id}/export.zip")
 def export_project_zip(
     fmt: str = "xlsx",

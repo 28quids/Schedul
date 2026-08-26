@@ -22,6 +22,7 @@ from ..deps import (
 )
 from ..schemas import (
     BuildingIn,
+    BulkRevisionIn,
     ProjectColumnsIn,
     BuildingOut,
     CloneIn,
@@ -289,6 +290,77 @@ def list_archived(
         )
         out.extend(schedule_view(session, s, scheme, house) for s in archived)
     return out
+
+
+# ----------------------------------------------------------- revisions ---
+
+
+@router.post("/{project_id}/revisions/bulk")
+def bulk_revision(
+    payload: BulkRevisionIn,
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Append the same revision across many schedules, or preview doing so.
+
+    Each schedule continues **its own** series rather than being forced to a
+    shared code, because two schedules on the same job are rarely at the same
+    revision and forcing them level would misstate history.
+    """
+    import datetime as _date
+
+    from ...core.revisions import next_code, sort_key
+    from ...db.models import RevisionRow
+    from ...services.converters import revisions_of
+    from ...services.issue import issue_revision
+
+    wanted = set(payload.schedule_ids)
+    targets: list[Schedule] = []
+    for building in svc.buildings_of(session, project):
+        for schedule in svc.live_schedules(session, building):
+            if not wanted or schedule.id in wanted:
+                targets.append(schedule)
+
+    if not targets:
+        raise HTTPException(status_code=400, detail="no schedules selected")
+
+    planned = [
+        {
+            "schedule_id": s.id,
+            "code": s.code,
+            "title": s.schedule_type.title if s.schedule_type else s.code,
+            "building": s.building.label,
+            "from": (revisions_of(s)[-1].code if revisions_of(s) else "—"),
+            "to": next_code(revisions_of(s), published=payload.published),
+        }
+        for s in targets
+    ]
+
+    if not payload.apply:
+        return {"applied": 0, "changes": planned}
+
+    issue_date = payload.issue_date or _date.date.today()
+    for schedule, plan in zip(targets, planned):
+        revision = RevisionRow(
+            schedule_id=schedule.id,
+            position=max((r.position for r in schedule.revisions), default=-1) + 1,
+            code=plan["to"],
+            status=payload.status,
+            issue_date=issue_date,
+            prepared_by=payload.prepared_by,
+            checked_by=payload.checked_by,
+            approved_by=payload.approved_by,
+            description=payload.description,
+            sort_key=sort_key(plan["to"]),
+        )
+        session.add(revision)
+        session.flush()
+        session.expire(schedule, ["revisions"])
+        if payload.issue:
+            issue_revision(session, schedule, revision, org)
+
+    return {"applied": len(targets), "changes": planned}
 
 
 # --------------------------------------------------------- extra columns ---
