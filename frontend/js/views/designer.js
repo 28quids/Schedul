@@ -232,8 +232,10 @@ function columnRow(column, index, render) {
       }),
     ]),
     el('td', { style: 'width:90px' }, [
+      // No placeholder: a greyed 'l/s' on every unit-less column reads as a
+      // real unit at a glance, which is worse than an empty box.
       input(column.unit, {
-        placeholder: 'l/s',
+        title: 'Rendered on the unit row beneath the header. Leave blank if the column has no unit.',
         on: { input: (e) => { column.unit = e.target.value; validate(); } },
       }),
     ]),

@@ -294,7 +294,13 @@ async function addBuilding() {
   });
   if (!result || !ref.value.trim()) return;
   try {
-    await api.projects.addBuilding(state.project.id, { ref: ref.value.trim(), name: name.value.trim() });
+    const updated = await api.projects.addBuilding(state.project.id, {
+      ref: ref.value.trim(), name: name.value.trim(),
+    });
+    // Switch to what was just created: staying on the previous building looks
+    // like nothing happened, and the next thing anyone does is fill this one in.
+    const created = updated.buildings.find((b) => b.ref === ref.value.trim());
+    if (created) state.buildingId = created.id;
     await reload();
   } catch (error) { fail(error); }
 }
@@ -345,11 +351,13 @@ async function cloneBuilding() {
 
   if (!ok || !ref.value.trim()) return;
   try {
-    await api.projects.cloneBuilding(state.project.id, source.id, {
+    const updated = await api.projects.cloneBuilding(state.project.id, source.id, {
       ref: ref.value.trim(),
       name: name.value.trim(),
       codes: [...chosen],
     });
+    const created = updated.buildings.find((b) => b.ref === ref.value.trim());
+    if (created) state.buildingId = created.id;
     toast('Building cloned', 'ok');
     await reload();
   } catch (error) { fail(error); }
