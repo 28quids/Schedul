@@ -48,6 +48,7 @@ __all__ = [
     "RevisionRow",
     "Equipment",
     "EquipmentFlag",
+    "EquipmentChange",
 ]
 
 
@@ -435,6 +436,43 @@ class Equipment(TimestampMixin, Base):
     flags: Mapped[list["EquipmentFlag"]] = relationship(
         back_populates="equipment", cascade="all, delete-orphan"
     )
+    change_log: Mapped[list["EquipmentChange"]] = relationship(
+        back_populates="equipment",
+        cascade="all, delete-orphan",
+        order_by="EquipmentChange.at.desc()",
+    )
+
+
+class EquipmentChange(TimestampMixin, Base):
+    """One recorded change to a library entry.
+
+    Library values are read rather than copied, so correcting a product changes
+    every schedule that uses it at once. That is the feature, and it is also why
+    a practice needs to be able to see what changed and where it landed.
+    """
+
+    __tablename__ = "equipment_change"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    equipment_id: Mapped[str] = mapped_column(
+        ForeignKey("equipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Recorded in Python rather than by the database clock: SQLite's now() has
+    #: one-second resolution, so several changes in the same second would tie
+    #: and the log would come back in an arbitrary order.
+    at: Mapped[_dt.datetime] = mapped_column(
+        DateTime,
+        default=lambda: _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
+        nullable=False,
+        index=True,
+    )
+    #: created | updated | approved | rejected | restored
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: {column: [before, after]} for an update.
+    changes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), default="")
+
+    equipment: Mapped["Equipment"] = relationship(back_populates="change_log")
 
 
 class EquipmentFlag(TimestampMixin, Base):

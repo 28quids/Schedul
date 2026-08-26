@@ -753,3 +753,74 @@ class TestNumberingRules:
         schedule = result["buildings"][0]["schedules"][0]
         assert schedule["number"] == 1
         assert "-00000001-" in schedule["docnum"]
+
+
+class TestLibraryAudit:
+    """P1.7: what changed in the library, and where it landed."""
+
+    @pytest.fixture()
+    def setup(self, client, project) -> dict:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        sid = result["buildings"][0]["schedules"][0]["id"]
+        entry = client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemari"}, "created_by": "AG",
+        }).json()
+        client.post(f"/api/schedules/{sid}/rows", json={"values": {
+            "Unit Reference": "M-1", "Model Reference": "SYS-1",
+        }})
+        return {"schedule": sid, "entry": entry["id"]}
+
+    def test_creating_an_entry_is_logged(self, client, setup):
+        log = client.get("/api/library/review/changes").json()
+        assert log[-1]["action"] == "created"
+        assert log[-1]["model_reference"] == "SYS-1"
+        assert log[-1]["actor"] == "AG"
+
+    def test_an_edit_records_what_moved(self, client, setup):
+        client.put(f"/api/library/{setup['entry']}", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair"}, "created_by": "LJ",
+        })
+        change = client.get("/api/library/review/changes").json()[0]
+        assert change["action"] == "updated"
+        assert change["changes"] == [
+            {"column": "Manufacturer", "before": "Systemari", "after": "Systemair"}
+        ]
+
+    def test_an_edit_that_changes_nothing_is_not_logged(self, client, setup):
+        before = len(client.get("/api/library/review/changes").json())
+        client.put(f"/api/library/{setup['entry']}", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemari"},
+        })
+        assert len(client.get("/api/library/review/changes").json()) == before
+
+    def test_the_blast_radius_is_visible(self, client, setup):
+        """Editing a product is not a local act; this is what it would touch."""
+        impact = client.get(f"/api/library/{setup['entry']}/affected").json()
+        assert impact["total_rows"] == 1
+        assert impact["schedules"][0]["code"] == "MVHR"
+        assert impact["schedules"][0]["rows"] == 1
+
+    def test_an_overriding_row_is_counted_separately(self, client, setup):
+        """A row that overrides the value would not move, so say so."""
+        row = client.get(f"/api/schedules/{setup['schedule']}").json()["rows"][0]["id"]
+        client.put(f"/api/schedules/{setup['schedule']}/rows/{row}", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Manufacturer": "Vent-Axia"},
+        })
+        impact = client.get(f"/api/library/{setup['entry']}/affected").json()
+        assert impact["rows_overriding"] == 1
+
+    def test_approving_is_logged(self, client, setup):
+        client.post(f"/api/library/review/{setup['entry']}/approved")
+        assert client.get("/api/library/review/changes").json()[0]["action"] == "approved"
+
+    def test_the_log_can_be_filtered_by_type(self, client, setup):
+        assert client.get("/api/library/review/changes?type_code=MVHR").json()
+        assert client.get("/api/library/review/changes?type_code=AHU").json() == []

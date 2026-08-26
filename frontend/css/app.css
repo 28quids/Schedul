@@ -426,3 +426,13 @@ td.cell-library:hover .cell-override { visibility: visible; }
 .cell-override:hover { color: var(--blue-dark); }
 .cell-reset { color: var(--blue-dark); font-weight: 400; }
 td.cell-library { position: relative; }
+
+/* Drag the right edge of a preview column to set its width.
+   Scoped to the preview: a blanket `th { position: relative }` would override
+   the sticky positioning that keeps table headers in view everywhere else. */
+#designer-preview table.sheet thead th { position: relative; }
+#designer-preview .col-resize {
+  position: absolute; top: 0; right: -3px; width: 9px; height: 100%;
+  cursor: col-resize; background: transparent; z-index: 5;
+}
+#designer-preview .col-resize:hover { background: var(--blue); opacity: .5; }

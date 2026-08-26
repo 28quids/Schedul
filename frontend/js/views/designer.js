@@ -188,7 +188,10 @@ function columnsCard() {
       button('+ From library', { class: 'btn btn-sm', on: { click: () => add('library') } }),
       button('+ Derived', { class: 'btn btn-sm', on: { click: () => add('derived') } }),
     ],
-    'Model Reference is added automatically between the input and library columns.'
+    'Model Reference is added automatically between the input and library columns. ' +
+    'Every "from library" column here becomes a field on this type\u2019s equipment ' +
+    'library, so the type is usable as soon as it is saved \u2014 there is nothing ' +
+    'else to set up.'
   );
 }
 
@@ -242,7 +245,13 @@ function columnRow(column, index, render) {
     el('td', { style: 'width:70px' }, [
       input(String(column.width), {
         type: 'number',
-        on: { input: (e) => { column.width = parseInt(e.target.value, 10) || 14; } },
+        dataset: { widthFor: column.name },
+        on: {
+          input: (e) => {
+            column.width = parseInt(e.target.value, 10) || 14;
+            validate();
+          },
+        },
       }),
     ]),
     el('td', { style: 'min-width:280px' }, [
@@ -286,13 +295,34 @@ function previewCard() {
 }
 
 function renderPreview(preview) {
+  // The preview is where the widths are actually judged, so it is where they
+  // are set: drag a column edge and the number in the table above follows.
+  // Model Reference is inserted automatically and is not one of d.columns, so
+  // the preview index has to be mapped back to the authored column.
+  const columnAt = (index) => {
+    const inputs = d.columns.filter((c) => c.kind === 'input');
+    if (index < inputs.length) return inputs[index];
+    if (index === inputs.length) return null;  // Model Reference
+    const rest = d.columns.filter((c) => c.kind !== 'input');
+    return rest[index - inputs.length - 1] || null;
+  };
+
+  const header = el('tr', {}, preview.headers.map((h, i) => {
+    const column = columnAt(i);
+    const th = el('th', {
+      class: `g-${preview.kinds[i]}`,
+      style: column ? `width:${Math.max(column.width * 7, 48)}px` : '',
+      title: column ? `${column.width} characters wide — drag the edge to change` : '',
+    }, [h]);
+    if (column) th.appendChild(dragHandle(th, column));
+    return th;
+  }));
+
   return el('div', {}, [
     el('div', { class: 'sheet-wrap', style: 'max-height:none' }, [
       el('table', { class: 'sheet' }, [
         el('thead', {}, [
-          el('tr', {}, preview.headers.map((h, i) =>
-            el('th', { class: `g-${preview.kinds[i]}`, text: h })
-          )),
+          header,
           el('tr', { class: 'units' }, preview.units.map((u, i) =>
             el('th', { class: `g-${preview.kinds[i]}`, text: u || '' })
           )),
@@ -317,6 +347,42 @@ function renderPreview(preview) {
       'because the exported workbook writes static formulas only.',
     ]),
   ]);
+}
+
+/** A draggable right edge that sets a column's width in characters. */
+function dragHandle(th, column) {
+  const handle = el('span', { class: 'col-resize', title: 'Drag to set the width' });
+
+  handle.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = column.width;
+
+    const onMove = (move) => {
+      // Roughly 7px per character at this font size; the stored value is in
+      // characters because that is what Excel's column width means.
+      const chars = Math.round((move.clientX - startX) / 7);
+      column.width = Math.max(4, Math.min(80, startWidth + chars));
+      th.style.width = `${Math.max(column.width * 7, 48)}px`;
+      th.title = `${column.width} characters wide — drag the edge to change`;
+      const box = document.querySelector(`[data-width-for="${cssEscape(column.name)}"]`);
+      if (box) box.value = String(column.width);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      validate();
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  return handle;
+}
+
+function cssEscape(value) {
+  return String(value).replace(/["\\]/g, '\\$&');
 }
 
 /* ---------------------------------------------------------------- notes --- */

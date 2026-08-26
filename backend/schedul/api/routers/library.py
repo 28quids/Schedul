@@ -149,6 +149,41 @@ def resolve_flag(
     lib.resolve_flag(session, flag_id)
 
 
+@router.get("/review/changes")
+def change_log(
+    type_code: str = "",
+    limit: int = 100,
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> list[dict[str, object]]:
+    """What has changed in the library recently, newest first."""
+    return lib.change_log(session, org.id, type_code=type_code, limit=limit)
+
+
+@router.get("/{equipment_id}/affected")
+def affected(
+    equipment_id: str,
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Which schedules use this product and would move if it changed.
+
+    Library values are read rather than copied, so editing a product is not a
+    local act. This is the blast radius, before doing it.
+    """
+    entry = session.get(Equipment, equipment_id)
+    if entry is None or entry.organisation_id != org.id:
+        raise not_found("equipment")
+    schedules = lib.affected_schedules(session, org.id, equipment_id)
+    return {
+        "model_reference": entry.model_reference,
+        "type_code": entry.type_code,
+        "schedules": schedules,
+        "total_rows": sum(s["rows"] for s in schedules),
+        "rows_overriding": sum(s["rows_overriding"] for s in schedules),
+    }
+
+
 @router.put("/{equipment_id}", response_model=EquipmentOut)
 def update_equipment(
     equipment_id: str,
@@ -161,10 +196,12 @@ def update_equipment(
         raise not_found("equipment")
     stype = _type(session, org, entry.type_code)
     allowed = {c.legacy_name for c in stype.library}
+    before = dict(entry.values or {})
     entry.values = {k: v for k, v in payload.values.items() if k in allowed}
     if payload.model_reference.strip():
         entry.model_reference = payload.model_reference.strip()
     session.flush()
+    lib.record_change(session, entry, "updated", before=before, actor=payload.created_by)
     return _view(entry)
 
 
