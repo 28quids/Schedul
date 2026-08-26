@@ -1,0 +1,68 @@
+{
+  "_comment": "Project-level configuration. Edit this, then run build_project.py. Everything here is written into the generated files as VALUES, so no external links are created.",
+
+  "project": {
+    "Client": "SAMPLECLIENT",
+    "Project Name": "SAMPLE PROJECT",
+    "Project Number": "Z9A6461Y19",
+    "Site Address": "",
+    "Architect": "",
+    "Main Contractor": "",
+    "RIBA Stage": "Stage 4",
+    "Prepared By": "AG",
+    "Checked By": "LJ",
+    "Approved By": "RS"
+  },
+
+  "document_number": {
+    "_comment": "Tokens available: {project_number} {originator} {volume} {client_ref} {doc_type} {discipline} {number} {classification} {level} {location}. Derived from the Radiant Panel example.",
+    "pattern": "{project_number}-{originator}-{volume}-{client_ref}-{doc_type}-{discipline}-{number}-{classification}-{level}-{location}",
+    "originator": "BOV",
+    "volume": "5_6",
+    "client_ref": "PROJECTNUMBER",
+    "doc_type": "SC",
+    "discipline": "M",
+    "classification": "G00300",
+    "level": "XX",
+    "location": "XX",
+    "number_start": 10,
+    "number_width": 8
+  },
+
+  "central_paths": {
+    "_comment": "MUST be a project or team SharePoint location, NOT a personal OneDrive. The macros read and write here. Use UNC or a synced local path.",
+    "project_info": "C:\\\\SharePoint\\\\Project\\\\Schedules\\\\MAINPROJECTINFO.xlsx",
+    "equipment_library": "C:\\\\SharePoint\\\\Company\\\\MEP Library\\\\EQUIPMENT_LIBRARY_MASTER.xlsx",
+    "submissions_folder": "C:\\\\SharePoint\\\\Company\\\\MEP Library\\\\submissions"
+  },
+
+  "design_constants": {
+    "LPHW Flow Temperature (degC)": 70,
+    "LPHW Return Temperature (degC)": 50,
+    "CHW Flow Temperature (degC)": 6,
+    "CHW Return Temperature (degC)": 12,
+    "Design Ambient Temperature (degC)": 21,
+    "Specific Heat Capacity of Water (kJ/kgK)": 4.18,
+    "EN 442 Radiator Exponent (n)": 1.3
+  },
+
+  "house_style": {
+    "cover_font": "Verdana",
+    "schedule_font": "Arial",
+    "title_grey": "FF4D4D4D",
+    "title_blue": "FF009DF0",
+    "title_size": 30,
+    "cover_body_size": 11,
+    "schedule_body_size": 8,
+    "data_rows": 40,
+    "revision_rows": 20
+  },
+
+  "general_notes": [
+    "This equipment schedule must be read in conjunction and in compliance with the associated drawings, specification and design risk assessment.",
+    "All equipment is scheduled on a performance basis. The contractor is responsible for confirming final selections with the manufacturer and for verifying that the selected equipment meets the scheduled duties.",
+    "Dimensions and weights are indicative and must be confirmed against manufacturer certified drawings prior to builderswork and structural sign-off.",
+    "Where a duty or dimension is amended, the contractor shall notify the designer before ordering.",
+    "Calculated columns are derived from the entered design data and the project design constants. Do not overwrite them."
+  ]
+}

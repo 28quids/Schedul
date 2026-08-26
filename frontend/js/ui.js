@@ -1,0 +1,229 @@
+// Small DOM helpers. No framework: the app is a handful of screens over a REST
+// API, and a build step would be one more thing to install on a Windows laptop.
+
+/** Create an element. `attrs.class`, `attrs.on` (event map) and `attrs.html` are special. */
+export function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === 'class') node.className = value;
+    else if (key === 'html') node.innerHTML = value;
+    else if (key === 'text') node.textContent = value;
+    else if (key === 'on') {
+      for (const [event, handler] of Object.entries(value)) node.addEventListener(event, handler);
+    } else if (key === 'dataset') {
+      Object.assign(node.dataset, value);
+    } else if (key in node && key !== 'list' && typeof value !== 'string') {
+      node[key] = value;
+    } else {
+      node.setAttribute(key, value);
+    }
+  }
+  append(node, children);
+  return node;
+}
+
+export function append(parent, children) {
+  const list = Array.isArray(children) ? children : [children];
+  for (const child of list) {
+    if (child === null || child === undefined || child === false) continue;
+    parent.appendChild(typeof child === 'object' ? child : document.createTextNode(String(child)));
+  }
+  return parent;
+}
+
+export function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+  return node;
+}
+
+export function mount(node) {
+  const main = document.getElementById('main');
+  clear(main);
+  main.appendChild(node);
+  main.scrollTop = 0;
+  return node;
+}
+
+/** A labelled form control. */
+export function field(label, control, help) {
+  return el('div', { class: 'field' }, [
+    el('label', { text: label }),
+    control,
+    help ? el('span', { class: 'help', text: help }) : null,
+  ]);
+}
+
+export function input(value, attrs = {}) {
+  return el('input', { type: 'text', value: value ?? '', ...attrs });
+}
+
+export function select(options, value, attrs = {}) {
+  const node = el('select', attrs);
+  for (const option of options) {
+    const [val, label] = Array.isArray(option) ? option : [option, option];
+    node.appendChild(el('option', { value: val, text: label, selected: val === value }));
+  }
+  node.value = value ?? '';
+  return node;
+}
+
+export function button(label, attrs = {}) {
+  return el('button', { class: 'btn', type: 'button', ...attrs }, [label]);
+}
+
+export function pill(text, tone = 'quiet') {
+  return el('span', { class: `pill pill-${tone}`, text });
+}
+
+export function notice(text, tone = 'info', items = []) {
+  return el('div', { class: `notice notice-${tone}` }, [
+    el('div', { text }),
+    items.length ? el('ul', {}, items.map((i) => el('li', { text: i }))) : null,
+  ]);
+}
+
+export function card(title, body, actions = [], hint = '') {
+  return el('section', { class: 'card' }, [
+    title
+      ? el('header', { class: 'card-head' }, [
+          el('div', {}, [
+            el('h2', { text: title }),
+            hint ? el('div', { class: 'hint', text: hint }) : null,
+          ]),
+          actions.length ? el('div', { class: 'btn-row' }, actions) : null,
+        ])
+      : null,
+    el('div', { class: 'card-body' }, [body]),
+  ]);
+}
+
+export function table(headers, rows) {
+  return el('div', { class: 'table-wrap' }, [
+    el('table', {}, [
+      el('thead', {}, [
+        el('tr', {}, headers.map((h) =>
+          typeof h === 'object'
+            ? el('th', { class: h.class || '', text: h.text })
+            : el('th', { text: h })
+        )),
+      ]),
+      el('tbody', {}, rows),
+    ]),
+  ]);
+}
+
+export function empty(title, message, action) {
+  return el('div', { class: 'empty' }, [
+    el('h3', { text: title }),
+    el('p', { class: 'muted', text: message }),
+    action || null,
+  ]);
+}
+
+export function toast(message, tone = '') {
+  const node = el('div', { class: `toast ${tone}`.trim(), text: message });
+  document.getElementById('toasts').appendChild(node);
+  setTimeout(() => node.remove(), tone === 'err' ? 6500 : 3200);
+}
+
+/** Show an error without losing what the server actually said. */
+export function fail(error) {
+  console.error(error);
+  toast(error && error.message ? error.message : String(error), 'err');
+}
+
+/**
+ * A modal dialog. `render(close)` builds the body; `actions(close)` the footer.
+ * Resolves when closed so callers can `await` a decision.
+ */
+export function modal({ title, render, actions, wide = false }) {
+  return new Promise((resolve) => {
+    const root = document.getElementById('modal-root');
+    let settled = false;
+
+    const close = (value) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('keydown', onKey);
+      clear(root);
+      resolve(value);
+    };
+    const onKey = (event) => { if (event.key === 'Escape') close(undefined); };
+    document.addEventListener('keydown', onKey);
+
+    const box = el('div', { class: `modal${wide ? ' wide' : ''}` }, [
+      el('header', { class: 'modal-head' }, [
+        el('h2', { text: title }),
+        el('button', { class: 'icon-btn', title: 'Close', on: { click: () => close(undefined) } }, ['×']),
+      ]),
+      el('div', { class: 'modal-body' }, [render(close)]),
+      el('footer', { class: 'modal-foot' }, actions ? actions(close) : [
+        button('Close', { on: { click: () => close(undefined) } }),
+      ]),
+    ]);
+
+    const backdrop = el('div', {
+      class: 'modal-backdrop',
+      on: { mousedown: (e) => { if (e.target === backdrop) close(undefined); } },
+    }, [box]);
+
+    clear(root).appendChild(backdrop);
+    const first = box.querySelector('input, select, textarea, button.btn-primary');
+    if (first) first.focus();
+  });
+}
+
+/** Confirm a consequential action, naming the consequence rather than "are you sure". */
+export async function confirmDialog({ title, message, confirmLabel = 'Confirm', danger = false, detail }) {
+  return (await modal({
+    title,
+    render: () => el('div', {}, [
+      el('p', { text: message }),
+      detail || null,
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button(confirmLabel, {
+        class: `btn ${danger ? 'btn-danger' : 'btn-primary'}`,
+        on: { click: () => close(true) },
+      }),
+    ],
+  })) === true;
+}
+
+/** Format a value for display without turning 0 into an empty cell. */
+export function show(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'number') {
+    if (Number.isInteger(value)) return String(value);
+    return value.toFixed(2);
+  }
+  return String(value);
+}
+
+export function formatDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+/** Debounce, for save-as-you-type without a request per keystroke. */
+export function debounce(fn, wait = 400) {
+  let timer = null;
+  const wrapped = (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+  wrapped.flush = (...args) => { clearTimeout(timer); fn(...args); };
+  wrapped.cancel = () => clearTimeout(timer);
+  return wrapped;
+}
+
+export function download(url) {
+  const link = el('a', { href: url, download: '' });
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}

@@ -1,0 +1,343 @@
+"""Projects, buildings, schedules and numbering."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ...core.numbering import RenumberPlan
+from ...db.models import Building, Organisation, Project, Schedule
+from ...services import projects as svc
+from ...services.projects import ServiceError
+from ..deps import (
+    building_view,
+    current_org,
+    get_building,
+    get_db,
+    get_project,
+    get_schedule,
+    project_view,
+    schedule_view,
+)
+from ..schemas import (
+    BuildingIn,
+    BuildingOut,
+    CloneIn,
+    PlanChange,
+    PlanOut,
+    ProjectIn,
+    ProjectOut,
+    ProjectSummary,
+    RenameBuildingIn,
+    RenumberIn,
+    ScheduleIn,
+    ScheduleOut,
+)
+
+router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+def _plan_out(plan: RenumberPlan, applied: int = 0) -> PlanOut:
+    return PlanOut(
+        operation=plan.operation,
+        changes=[
+            PlanChange(
+                code=c.code,
+                old_number=c.old_number,
+                new_number=c.new_number,
+                old_docnum=c.old_docnum,
+                new_docnum=c.new_docnum,
+                old_filename=c.old_filename,
+                new_filename=c.new_filename,
+                blocked=c.blocked,
+                changed=c.changed,
+            )
+            for c in plan.changes
+        ],
+        warnings=plan.warnings,
+        blocked_count=len(plan.blocked),
+        can_apply=plan.can_apply,
+        applied=applied,
+    )
+
+
+@router.get("", response_model=list[ProjectSummary])
+def list_projects(
+    session: Session = Depends(get_db), org: Organisation = Depends(current_org)
+) -> list[ProjectSummary]:
+    projects = session.scalars(
+        select(Project)
+        .where(Project.organisation_id == org.id)
+        .order_by(Project.updated_at.desc())
+    )
+    out: list[ProjectSummary] = []
+    for p in projects:
+        buildings = svc.buildings_of(session, p)
+        out.append(
+            ProjectSummary(
+                id=p.id,
+                name=p.name,
+                number=p.number,
+                client=p.client,
+                building_count=len(buildings),
+                schedule_count=sum(
+                    len(svc.live_schedules(session, b)) for b in buildings
+                ),
+                updated_at=p.updated_at,
+            )
+        )
+    return out
+
+
+@router.post("", response_model=ProjectOut, status_code=201)
+def create_project(
+    payload: ProjectIn,
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    project = Project(organisation_id=org.id, **payload.model_dump())
+    session.add(project)
+    session.flush()
+    # Every project has at least one building in the data model; the UI hides
+    # the layer while there is only one, so small jobs never see it.
+    svc.add_building(session, project, project.number or "Building 1", "")
+    return project_view(session, project, org)
+
+
+@router.get("/{project_id}", response_model=ProjectOut)
+def read_project(
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    return project_view(session, project, org)
+
+
+@router.put("/{project_id}", response_model=ProjectOut)
+def update_project(
+    payload: ProjectIn,
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    for key, value in payload.model_dump().items():
+        setattr(project, key, value)
+    session.flush()
+    return project_view(session, project, org)
+
+
+@router.delete("/{project_id}", status_code=204)
+def delete_project(
+    project: Project = Depends(get_project), session: Session = Depends(get_db)
+) -> None:
+    session.delete(project)
+
+
+# ------------------------------------------------------------- buildings ---
+
+
+@router.post("/{project_id}/buildings", response_model=ProjectOut, status_code=201)
+def add_building(
+    payload: BuildingIn,
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    try:
+        svc.add_building(session, project, payload.ref, payload.name)
+    except ServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return project_view(session, project, org)
+
+
+@router.post("/{project_id}/buildings/{building_id}/clone", response_model=ProjectOut)
+def clone_building(
+    payload: CloneIn,
+    project: Project = Depends(get_project),
+    building: Building = Depends(get_building),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    try:
+        svc.clone_building(
+            session, project, building, payload.ref, payload.name, payload.codes
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return project_view(session, project, org)
+
+
+@router.get("/{project_id}/buildings/{building_id}/clone-candidates")
+def clone_candidates(
+    building: Building = Depends(get_building), session: Session = Depends(get_db)
+) -> dict[str, list[str]]:
+    return {"codes": svc.clone_candidates(session, building)}
+
+
+@router.put("/{project_id}/buildings/{building_id}", response_model=ProjectOut)
+def update_building(
+    payload: BuildingIn,
+    project: Project = Depends(get_project),
+    building: Building = Depends(get_building),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    building.name = payload.name
+    if payload.ref.strip() and payload.ref.strip() != building.ref:
+        try:
+            svc.apply_building_rename(session, building, payload.ref)
+        except ServiceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.flush()
+    return project_view(session, project, org)
+
+
+@router.post("/{project_id}/buildings/{building_id}/rename", response_model=PlanOut)
+def rename_building(
+    payload: RenameBuildingIn,
+    building: Building = Depends(get_building),
+    session: Session = Depends(get_db),
+) -> PlanOut:
+    """Preview or apply a building-ref change.
+
+    Scoped to one building, which is what makes the "-PROJECTNUMBER- placeholder
+    to a real block code" flow safe on a live multi-block job.
+    """
+    if not payload.apply:
+        return _plan_out(svc.rename_building_plan(session, building, payload.ref))
+    try:
+        plan = svc.apply_building_rename(
+            session, building, payload.ref, force=payload.force
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _plan_out(plan, applied=len(plan.changes))
+
+
+@router.delete("/{project_id}/buildings/{building_id}", response_model=ProjectOut)
+def delete_building(
+    project: Project = Depends(get_project),
+    building: Building = Depends(get_building),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    svc.delete_building(session, building)
+    return project_view(session, project, org)
+
+
+# ------------------------------------------------------------- schedules ---
+
+
+@router.post(
+    "/{project_id}/buildings/{building_id}/schedules",
+    response_model=ProjectOut,
+    status_code=201,
+)
+def add_schedule(
+    payload: ScheduleIn,
+    project: Project = Depends(get_project),
+    building: Building = Depends(get_building),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    try:
+        svc.add_schedule(session, building, payload.code)
+    except ServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return project_view(session, project, org)
+
+
+@router.delete("/{project_id}/schedules/{schedule_id}", response_model=ProjectOut)
+def archive_schedule(
+    project: Project = Depends(get_project),
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    """Remove a schedule from the record. Its data and number are kept."""
+    svc.archive_schedule(session, schedule)
+    return project_view(session, project, org)
+
+
+@router.post("/{project_id}/schedules/{schedule_id}/restore", response_model=ProjectOut)
+def restore_schedule(
+    project: Project = Depends(get_project),
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    svc.restore_schedule(session, schedule)
+    return project_view(session, project, org)
+
+
+@router.get("/{project_id}/archived", response_model=list[ScheduleOut])
+def list_archived(
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> list[ScheduleOut]:
+    house = svc.house_standard_for(session, org.id)
+    scheme = svc.naming_scheme_for(session, org.id)
+    out: list[ScheduleOut] = []
+    for building in svc.buildings_of(session, project):
+        archived = session.scalars(
+            select(Schedule).where(
+                Schedule.building_id == building.id, Schedule.deleted_marker != ""
+            )
+        )
+        out.extend(schedule_view(session, s, scheme, house) for s in archived)
+    return out
+
+
+# ------------------------------------------------------------- numbering ---
+
+
+@router.post("/{project_id}/buildings/{building_id}/renumber", response_model=PlanOut)
+def renumber(
+    payload: RenumberIn,
+    building: Building = Depends(get_building),
+    session: Session = Depends(get_db),
+) -> PlanOut:
+    """Preview a renumber operation, or apply it.
+
+    Free-text number editing produces collisions immediately, so it is not
+    offered: these five operations plus a plan the user confirms are the whole
+    interface.
+    """
+    try:
+        plan = svc.plan_operation(
+            session,
+            building,
+            payload.operation,
+            code=payload.code,
+            other_code=payload.other_code,
+            number=payload.number,
+            allow_locked=payload.allow_locked,
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not payload.apply:
+        return _plan_out(plan)
+
+    try:
+        applied = svc.apply_plan(session, building, plan)
+    except ServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _plan_out(plan, applied=applied)
+
+
+@router.get("/{project_id}/buildings/{building_id}/audit")
+def audit_building(
+    building: Building = Depends(get_building), session: Session = Depends(get_db)
+) -> dict[str, object]:
+    issues = svc.run_audit(session, building)
+    return {
+        "building_id": building.id,
+        "building": building.label,
+        "issues": [
+            {"severity": i.severity, "kind": i.kind, "message": i.message, "code": i.code or ""}
+            for i in issues
+        ],
+    }

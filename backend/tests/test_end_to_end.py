@@ -1,0 +1,339 @@
+"""The whole stack, from the HTTP API to a recalculated workbook.
+
+This is the test that matters most, because it exercises the seam the rewrite
+was built around: a user types into the web grid, and the workbook they export
+has to agree with what the grid showed them. The grid computes in Python and the
+workbook computes in Excel, from one AST. If those two ever disagree the tool is
+lying to somebody, so the assertion is made against a real spreadsheet engine
+rather than against our own arithmetic.
+"""
+
+from __future__ import annotations
+
+import csv
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from openpyxl import load_workbook
+
+from schedul.export import pdf
+
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
+needs_soffice = pytest.mark.skipif(not pdf.available(), reason="LibreOffice is not installed")
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch) -> TestClient:
+    monkeypatch.setenv("SCHEDUL_DATA", str(tmp_path))
+    monkeypatch.setenv("SCHEDUL_DATABASE_URL", f"sqlite:///{tmp_path / 'e2e.db'}")
+
+    import schedul.db.session as session_module
+
+    session_module.SessionLocal = None
+    session_module.init_db(f"sqlite:///{tmp_path / 'e2e.db'}")
+
+    from schedul.api.main import app
+
+    return TestClient(app)
+
+
+@pytest.fixture()
+def project(client) -> dict:
+    response = client.post("/api/projects", json={
+        "name": "Head Office Refurbishment",
+        "number": "CM4220",
+        "client": "Northern Estates",
+        "prepared_by": "AG", "checked_by": "LJ", "approved_by": "RS",
+    })
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def recalculate(xlsx: Path) -> dict[str, list[list[str]]]:
+    with tempfile.TemporaryDirectory() as out_dir, tempfile.TemporaryDirectory() as profile:
+        subprocess.run(
+            [
+                pdf.soffice_path(), "--headless", "--norestore", "--nolockcheck",
+                f"-env:UserInstallation=file://{profile}",
+                "--convert-to",
+                "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,true,false,false,-1",
+                "--outdir", out_dir, str(xlsx),
+            ],
+            capture_output=True, text=True, timeout=240, check=False,
+        )
+        sheets = {}
+        for path in Path(out_dir).glob("*.csv"):
+            name = path.stem.split("-", 1)[1] if "-" in path.stem else path.stem
+            with path.open(newline="", encoding="utf-8") as fh:
+                sheets[name] = list(csv.reader(fh))
+        return sheets
+
+
+class TestSetupFlow:
+    def test_a_new_project_gets_one_hidden_building(self, project):
+        assert len(project["buildings"]) == 1
+        assert project["schedule_count"] == 0
+
+    def test_the_catalogue_is_ready_immediately(self, client):
+        types = client.get("/api/catalogue").json()
+        assert {"MVHR", "AHU", "FCU", "RADPANEL"} <= {t["code"] for t in types}
+
+    def test_adding_schedules_numbers_them_from_ten(self, client, project):
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "FCU", "AHU"):
+            response = client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+            assert response.status_code == 201, response.text
+        latest = response.json()
+        assert [s["number"] for s in latest["buildings"][0]["schedules"]] == [10, 11, 12]
+
+    def test_volume_follows_the_type_without_being_set(self, client, project):
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "FCU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        schedules = {
+            s["code"]: s["docnum"]
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        }
+        assert "-5_7-" in schedules["MVHR"], "MVHR is ventilation"
+        assert "-5_6-" in schedules["FCU"], "an FCU is heating and cooling"
+
+
+class TestEditing:
+    @pytest.fixture()
+    def schedule(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        return result["buildings"][0]["schedules"][0]["id"]
+
+    def test_derived_columns_compute_as_the_user_types(self, client, schedule):
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01",
+            "Supply Airflow (l/s)": "450",
+            "Extract Airflow (l/s)": "450",
+            "Total Power Input (W)": "396",
+        }}).json()
+        computed = grid["rows"][0]["computed"]
+        assert computed["Total Airflow (l/s)"] == 900
+        assert computed["Specific Fan Power (W/(l/s))"] == pytest.approx(0.88)
+
+    def test_numbers_typed_as_text_are_stored_as_numbers(self, client, schedule):
+        """Stored as text they would reach the workbook as text: left-aligned
+        and ignored by SUM."""
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01", "Supply Airflow (l/s)": "450",
+        }}).json()
+        assert grid["rows"][0]["values"]["Supply Airflow (l/s)"] == 450
+
+    def test_a_reference_with_a_leading_zero_stays_text(self, client, schedule):
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "0123",
+        }}).json()
+        assert grid["rows"][0]["values"]["Unit Reference"] == "0123"
+
+    def test_computed_columns_submitted_by_a_client_are_discarded(self, client, schedule):
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01",
+            "Supply Airflow (l/s)": 450,
+            "Total Airflow (l/s)": 999999,
+            "Manufacturer": "FORGED",
+        }}).json()
+        stored = grid["rows"][0]["values"]
+        assert "Total Airflow (l/s)" not in stored
+        assert "Manufacturer" not in stored
+
+    def test_equipment_saved_once_populates_the_library_columns(self, client, schedule):
+        client.post("/api/library", json={
+            "type_code": "MVHR",
+            "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Length (mm)": 1200},
+        }).raise_for_status()
+
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01", "Model Reference": "SYS-VSR-500",
+        }}).json()
+        computed = grid["rows"][0]["computed"]
+        assert computed["Manufacturer"] == "Systemair"
+        assert computed["Length (mm)"] == 1200
+
+    def test_correcting_the_library_corrects_every_schedule_at_once(self, client, schedule):
+        entry = client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemari"},
+        }).json()
+        client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "M-1", "Model Reference": "SYS-1",
+        }})
+
+        client.put(f"/api/library/{entry['id']}", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair"},
+        }).raise_for_status()
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert grid["rows"][0]["computed"]["Manufacturer"] == "Systemair"
+
+    def test_an_unknown_model_reference_is_explained_not_silently_blank(
+        self, client, schedule
+    ):
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "M-1", "Model Reference": "NOT-A-PRODUCT",
+        }}).json()
+        problems = grid["rows"][0]["problems"]
+        assert any("not in the equipment library" in p for p in problems.values())
+
+
+class TestRegister:
+    def test_the_register_reports_the_current_revision(self, client, project):
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        schedule = result["buildings"][0]["schedules"][0]["id"]
+
+        for code, status in [
+            ("P01", "S2 - Suitable for Information"),
+            ("P02", "S2 - Suitable for Information"),
+            ("C01", "S4 - Suitable for Stage Approval"),
+        ]:
+            client.post(f"/api/schedules/{schedule}/revisions", json={
+                "code": code, "status": status, "issue_date": "2026-06-09",
+            }).raise_for_status()
+
+        row = client.get("/api/register").json()[0]
+        assert row["revision"] == "C01", "a published revision outranks every preliminary one"
+        assert row["status"] == "S4"
+        assert row["status_description"] == "Suitable for Stage Approval"
+        assert row["file_name"].endswith(".xlsx")
+
+    def test_the_next_revision_continues_its_own_series(self, client, project):
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        schedule = result["buildings"][0]["schedules"][0]["id"]
+        for code in ("P01", "P02", "P03"):
+            client.post(f"/api/schedules/{schedule}/revisions", json={"code": code})
+
+        assert client.get(f"/api/schedules/{schedule}/revisions/next").json()["code"] == "P04"
+        assert (
+            client.get(f"/api/schedules/{schedule}/revisions/next?published=true").json()["code"]
+            == "C01"
+        ), "the first published revision is C01, not C04"
+
+
+class TestExport:
+    @pytest.fixture()
+    def populated(self, client, project) -> tuple[str, str]:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        schedule = result["buildings"][0]["schedules"][0]["id"]
+
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Length (mm)": 1200},
+        })
+        client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01",
+            "Location": "Roof Plant Area",
+            "Supply Airflow (l/s)": "450",
+            "Extract Airflow (l/s)": "450",
+            "Total Power Input (W)": "396",
+            "Model Reference": "SYS-VSR-500",
+        }})
+        client.post(f"/api/schedules/{schedule}/revisions", json={
+            "code": "P01", "status": "S2 - Suitable for Information",
+            "issue_date": "2026-06-09",
+        })
+        return project["id"], schedule
+
+    def test_the_export_carries_the_typed_data_as_numbers(self, client, populated, tmp_path):
+        _, schedule = populated
+        response = client.get(f"/api/schedules/{schedule}/export.xlsx")
+        assert response.status_code == 200
+
+        path = tmp_path / "export.xlsx"
+        path.write_bytes(response.content)
+        sheet = load_workbook(path)["Schedule"]
+
+        assert sheet["A6"].value == "MVHR-01"
+        assert sheet["D6"].value == 450 and isinstance(sheet["D6"].value, int)
+        assert sheet["H6"].value == 396
+
+    def test_a_project_exports_with_the_house_folder_layout(self, client, populated):
+        project_id, _ = populated
+        response = client.get(f"/api/projects/{project_id}/export.zip?fmt=xlsx")
+        assert response.status_code == 200
+
+        import io, zipfile
+
+        names = zipfile.ZipFile(io.BytesIO(response.content)).namelist()
+        # One building, so the files sit directly in Schedules/ (SPEC.md 4.3.1).
+        assert any(n.startswith("Schedules/") and n.endswith(".xlsx") for n in names)
+        assert "Schedules/MAINPROJECTINFO.xlsx" in names
+        assert not any(n.count("/") > 1 for n in names)
+
+    def test_a_multi_building_project_exports_into_per_building_folders(
+        self, client, project
+    ):
+        first = project["buildings"][0]["id"]
+        client.post(f"/api/projects/{project['id']}/buildings/{first}/schedules",
+                    json={"code": "MVHR"})
+        updated = client.post(f"/api/projects/{project['id']}/buildings",
+                              json={"ref": "HQ014", "name": "East Wing"}).json()
+        second = [b for b in updated["buildings"] if b["ref"] == "HQ014"][0]["id"]
+        client.post(f"/api/projects/{project['id']}/buildings/{second}/schedules",
+                    json={"code": "AHU"})
+
+        import io, zipfile
+
+        response = client.get(f"/api/projects/{project['id']}/export.zip?fmt=xlsx")
+        names = zipfile.ZipFile(io.BytesIO(response.content)).namelist()
+        folders = {n.split("/")[1] for n in names if n.count("/") > 1}
+        assert "HQ014" in folders
+        assert len(folders) == 2, "each building gets its own folder once there are several"
+
+    @needs_soffice
+    def test_the_workbook_agrees_with_the_grid(self, client, populated, tmp_path):
+        """The seam: what the browser showed and what Excel computes must match."""
+        _, schedule = populated
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        computed = grid["rows"][0]["computed"]
+
+        path = tmp_path / "export.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        sheets = recalculate(path)
+        excel = dict(zip(sheets["Schedule"][3], sheets["Schedule"][5]))
+
+        assert float(excel["Total Airflow"]) == float(computed["Total Airflow (l/s)"])
+        assert float(excel["Specific Fan Power"]) == pytest.approx(
+            float(computed["Specific Fan Power (W/(l/s))"])
+        )
+        # And the library lookup resolved inside Excel, not just in our grid.
+        assert excel["Manufacturer"] == computed["Manufacturer"] == "Systemair"
+
+    @needs_soffice
+    def test_the_pdf_is_produced(self, client, populated, tmp_path):
+        _, schedule = populated
+        response = client.get(f"/api/schedules/{schedule}/export.pdf")
+        assert response.status_code == 200
+        assert response.content[:5] == b"%PDF-"
+        assert len(response.content) > 5000
