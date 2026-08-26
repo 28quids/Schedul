@@ -46,20 +46,60 @@ generator never had it — generated files point `Metadata!B3` at
 
 ---
 
-## Files SPEC.md references that were not supplied
+## What the real hand-made file actually contains
 
-Flagged rather than worked around:
+`mep_core.py`, `mep_manager.py`, a hand-made original and a `MAINPROJECTINFO.xlsx`
+were supplied later and are now in `vendor/`. The original is a **Radiators**
+schedule (document `...-00000009-...`), not the Radiant Panel one SPEC.md 1a
+describes. Examined directly, it contradicts several of 1a's claims. 1a was
+evidently written about a different file, so **do not treat it as a description
+of house originals in general.**
 
-- `mep_core.py` and `mep_manager.py` — SPEC.md section 2 says these are "already
-  written for you ... in the repo". They are not in the upload. Not a blocker
-  under the new architecture, since the layer they implemented is being replaced.
-- **The hand-made Radiant Panel original** and its `MAINPROJECTINFO.xlsx` —
-  SPEC.md 1a calls these "the ground truth for house format", and acceptance
-  steps 19 and 20 depend on them. Without them, `scan_original` has no fixture
-  and the house-format claims in 1a cannot be re-verified. The Radiant Panel
-  **column list** is recoverable from 1a and is seeded into the catalogue; the
-  branding, the external links and the `CELL("filename")` formula are not.
-- `cover_template.xlsx` — expected on the shared path, supplied by the firm.
+**Confirmed by 1a:**
+
+- Title in A1, general notes in A2, field names row 4, units row 5, data from
+  row 6, print titles `$1:$5`. The autofilter `Schedule!$A$4:$M$26` pins row 4
+  as the header independently.
+- Notes are per equipment type, not per project. This file's read
+  "radiators are to be sized with a 55oC flow and 45oC return", "to be Stelrad
+  K2 or equal and approved" — equipment-specific and firm-specific wording, next
+  to generic compliance text. This is the strongest evidence for the two-source
+  notes block in 4.7.
+- No Building field anywhere.
+- openpyxl does warn `Shapes and drawings will be lost`, so a hand-made original
+  must never be round-tripped through Python.
+
+**Contradicted by the file:**
+
+| SPEC.md 1a says | The file has |
+|---|---|
+| Document number derived via `CELL("filename")` | **No formulas at all.** Zero `<f>` elements across all three sheets. |
+| Revision logic using `LET` / `XLOOKUP` / `XMATCH` / `TEXTBEFORE` | No formulas, so none of this exists |
+| A structured table `RevisionTable[Revision]` | No tables |
+| `Metadata!ScheduleName` points at the wrong cell | **There is no Metadata sheet.** Three sheets only: Front Cover, Revision page, Schedule |
+| Two external links, one to a personal OneDrive for MAINPROJECTINFO | **One** external link, a UNC path to a Design Risk Management Schedule, feeding a `dropdownPick` defined name |
+| Branding carried as drawing objects | One freeform line shape. No images |
+
+The revision-ranking bug in 6.1 is therefore **not** present in this original —
+it cannot be, because the file computes nothing. The fix still matters: it is
+real in the v1 generator, which is what actually produces schedules.
+
+**Two things the file reveals that the spec does not mention:**
+
+1. **It is a blank template.** No data rows, no prepared/checked/approved, no
+   document number, no suitability status. Only a revision `P01` and a date.
+2. **Its filename disagrees with its contents.** The filename carries project
+   number `Z9A6461Y19`; `Revision page!B11` says `Z9A6432Y19`. This is exactly
+   the drift `numbering.audit` exists to catch, found in the first real file we
+   looked at.
+
+**Consequence for importing existing spreadsheets.** Because a real house file
+is values with no formulas, importing one is reading a rectangular block of
+data, not reverse-engineering a calculation model. That is a far smaller problem
+than it appeared. See the "Importing existing spreadsheets" section of `docs/GOING-ONLINE.md`.
+
+Still not supplied: `cover_template.xlsx`, expected on the shared path from the
+firm's own branding.
 
 ---
 
