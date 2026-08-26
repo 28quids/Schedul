@@ -96,7 +96,10 @@ export const api = {
     updateRow: (id, rowId, values) =>
       request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),
-    replaceRows: (id, rows) => request('POST', `/api/schedules/${id}/rows/bulk`, rows),
+    duplicateRow: (id, rowId) =>
+      request('POST', `/api/schedules/${id}/rows/${rowId}/duplicate`),
+    paste: (id, body) => request('POST', `/api/schedules/${id}/rows/paste`, body),
+    fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
 
     revisions: (id) => request('GET', `/api/schedules/${id}/revisions`),
     nextRevision: (id, published) =>

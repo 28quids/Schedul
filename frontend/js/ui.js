@@ -227,3 +227,53 @@ export function download(url) {
   link.click();
   link.remove();
 }
+
+/**
+ * A dropdown anchored to an element but rendered at the top of the document.
+ *
+ * The schedule grid scrolls inside `overflow: auto`, so an absolutely
+ * positioned list inside a cell is clipped by the container and vanishes on the
+ * last row. Rendering into `document.body` with `position: fixed` escapes the
+ * clip; the trade-off is that the position has to be recomputed on scroll and
+ * resize, which is what `reposition` does.
+ *
+ * Flips above the anchor when there is not enough room below.
+ */
+export function anchoredList(anchor, { maxHeight = 260 } = {}) {
+  const list = el('div', { class: 'ac-list ac-portal' });
+  document.body.appendChild(list);
+
+  const reposition = () => {
+    const box = anchor.getBoundingClientRect();
+    const below = window.innerHeight - box.bottom;
+    const wanted = Math.min(maxHeight, list.scrollHeight || maxHeight);
+    const flip = below < wanted + 12 && box.top > below;
+
+    list.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - 300))}px`;
+    list.style.minWidth = `${Math.max(box.width, 240)}px`;
+    list.style.maxHeight = `${Math.min(wanted, flip ? box.top - 12 : below - 12)}px`;
+    if (flip) {
+      list.style.top = 'auto';
+      list.style.bottom = `${window.innerHeight - box.top + 2}px`;
+    } else {
+      list.style.bottom = 'auto';
+      list.style.top = `${box.bottom + 2}px`;
+    }
+  };
+
+  // Capture phase, because the scrolling element is an ancestor of the anchor
+  // and does not bubble scroll events.
+  const onScroll = () => reposition();
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onScroll);
+
+  return {
+    node: list,
+    reposition,
+    close() {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+      list.remove();
+    },
+  };
+}

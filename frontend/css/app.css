@@ -396,3 +396,21 @@ table.sheet tr:hover td.rowno { background: var(--grey-200); }
 }
 .strike { text-decoration: line-through; color: var(--grey-500); }
 .arrow { color: var(--grey-500); padding: 0 4px; }
+
+/* Rendered into <body> so the grid's overflow container cannot clip it. */
+.ac-list.ac-portal { position: fixed; z-index: 300; }
+
+.cell-flag {
+  border: none; background: none; cursor: pointer; padding: 0 4px;
+  color: var(--red); font-weight: 700; font-size: 12px; line-height: 1;
+}
+.cell-flag:hover { color: #8b1a21; }
+td.cell-input { position: relative; }
+td.cell-input .with-flag { display: flex; align-items: center; }
+td.cell-input .with-flag input { flex: 1; min-width: 0; }
+
+td.cell-selected input { box-shadow: inset 0 0 0 2px var(--blue); }
+.sheet-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.sheet-hint { font-size: 11.5px; color: var(--grey-600); }
+.saving { font-size: 11.5px; color: var(--grey-600); }
+.saving.err { color: var(--red); font-weight: 600; }

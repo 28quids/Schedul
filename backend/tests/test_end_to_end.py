@@ -337,3 +337,108 @@ class TestExport:
         assert response.status_code == 200
         assert response.content[:5] == b"%PDF-"
         assert len(response.content) > 5000
+
+
+class TestGridOperations:
+    """Phase 1 editing: duplicate, paste modes and fill-down."""
+
+    @pytest.fixture()
+    def schedule(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        return result["buildings"][0]["schedules"][0]["id"]
+
+    def add(self, client, schedule, **values):
+        return client.post(
+            f"/api/schedules/{schedule}/rows", json={"values": values}
+        ).json()
+
+    def test_duplicate_copies_the_row_and_inserts_it_below(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "MVHR-01", "Supply Airflow (l/s)": 450})
+        self.add(client, schedule, **{"Unit Reference": "MVHR-99"})
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        first = grid["rows"][0]["id"]
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/{first}/duplicate").json()
+        refs = [r["values"].get("Unit Reference") for r in grid["rows"]]
+        assert refs == ["MVHR-01", "MVHR-01", "MVHR-99"], "the copy sits directly below"
+        assert grid["rows"][1]["values"]["Supply Airflow (l/s)"] == 450
+        assert [r["position"] for r in grid["rows"]] == [0, 1, 2]
+
+    def test_paste_append_keeps_existing_rows(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "MVHR-01"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "append",
+            "rows": [{"values": {"Unit Reference": "MVHR-02"}}],
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["MVHR-01", "MVHR-02"]
+
+    def test_paste_insert_puts_rows_at_a_position(self, client, schedule):
+        for ref in ("A", "C"):
+            self.add(client, schedule, **{"Unit Reference": ref})
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "insert", "position": 1,
+            "rows": [{"values": {"Unit Reference": "B"}}],
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["A", "B", "C"]
+
+    def test_paste_replace_is_the_only_destructive_mode(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "OLD"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "replace",
+            "rows": [{"values": {"Unit Reference": "NEW"}}],
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["NEW"]
+
+    def test_pasted_numbers_are_still_coerced(self, client, schedule):
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "append",
+            "rows": [{"values": {"Unit Reference": "A", "Supply Airflow (l/s)": "450"}}],
+        }).json()
+        assert grid["rows"][0]["values"]["Supply Airflow (l/s)"] == 450
+
+    def test_fill_down_increments_a_reference(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "MVHR-001"})
+        for _ in range(3):
+            self.add(client, schedule)
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Unit Reference", "start_position": 0, "mode": "series",
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == [
+            "MVHR-001", "MVHR-002", "MVHR-003", "MVHR-004",
+        ]
+
+    def test_fill_down_copies_plain_text(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "A", "Location": "Roof Plantroom"})
+        self.add(client, schedule, **{"Unit Reference": "B"})
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Location", "start_position": 0,
+        }).json()
+        assert [r["values"].get("Location") for r in grid["rows"]] == [
+            "Roof Plantroom", "Roof Plantroom",
+        ]
+
+    def test_fill_down_refuses_a_computed_column(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "A"})
+        self.add(client, schedule)
+        response = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Total Airflow (l/s)", "start_position": 0,
+        })
+        assert response.status_code == 400
+        assert "calculated" in response.json()["detail"]
+
+    def test_fill_down_recomputes_derived_columns(self, client, schedule):
+        self.add(client, schedule, **{
+            "Unit Reference": "A", "Supply Airflow (l/s)": 450, "Extract Airflow (l/s)": 450,
+        })
+        self.add(client, schedule, **{"Unit Reference": "B", "Extract Airflow (l/s)": 450})
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Supply Airflow (l/s)", "start_position": 0, "mode": "copy",
+        }).json()
+        assert grid["rows"][1]["computed"]["Total Airflow (l/s)"] == 900

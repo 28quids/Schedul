@@ -192,6 +192,29 @@ class RowIn(BaseModel):
     position: int | None = None
 
 
+class PasteIn(BaseModel):
+    """Rows pasted from a spreadsheet, and what to do with them.
+
+    Paste used to be replace-only, which made it an all-or-nothing destructive
+    action on a schedule someone had already filled in.
+    """
+
+    mode: Literal["replace", "append", "insert"] = "append"
+    rows: list[RowIn] = Field(default_factory=list)
+    #: Where 'insert' puts them. Ignored by the other modes.
+    position: int = 0
+
+
+class FillIn(BaseModel):
+    """Fill one column down from a starting row."""
+
+    column: str
+    start_position: int
+    #: How many rows below the start to fill. Omit to reach the end.
+    count: int | None = None
+    mode: Literal["series", "copy"] = "series"
+
+
 # -------------------------------------------------------------- revisions ---
 
 

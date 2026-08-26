@@ -20,7 +20,10 @@ from ...services.converters import (
 )
 from ...services.grid import build_grid, editable_payload
 from ..deps import current_org, get_db, get_schedule, schedule_view
-from ..schemas import GridColumn, GridOut, RevisionIn, RevisionOut, RowIn, RowOut
+from ...core.references import fill_series
+from ..schemas import (
+    FillIn, GridColumn, GridOut, PasteIn, RevisionIn, RevisionOut, RowIn, RowOut,
+)
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
@@ -136,26 +139,134 @@ def delete_row(
     return _grid(session, schedule, org)
 
 
-@router.post("/{schedule_id}/rows/bulk", response_model=GridOut)
+def _renumber(rows: list[ScheduleRow]) -> None:
+    """Make positions contiguous from zero, in list order."""
+    for i, row in enumerate(rows):
+        row.position = i
+
+
+@router.post("/{schedule_id}/rows/{row_id}/duplicate", response_model=GridOut, status_code=201)
+def duplicate_row(
+    row_id: str,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Copy a row and insert the copy directly beneath it.
+
+    Schedules are repetitive: most rows differ from the one above in two or
+    three fields. Copying the whole row and editing those is far less typing
+    than starting blank.
+    """
+    source = session.get(ScheduleRow, row_id)
+    if source is None or source.schedule_id != schedule.id:
+        raise HTTPException(status_code=404, detail="no such row")
+
+    ordered = sorted(schedule.rows, key=lambda r: r.position)
+    copy = ScheduleRow(
+        schedule_id=schedule.id,
+        position=source.position + 1,
+        values=dict(source.values or {}),
+    )
+    index = ordered.index(source) + 1
+    ordered.insert(index, copy)
+    session.add(copy)
+    _renumber(ordered)
+    session.flush()
+    session.expire(schedule, ["rows"])
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/rows/paste", response_model=GridOut)
+def paste_rows(
+    payload: PasteIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Paste rows, replacing, appending or inserting.
+
+    'replace' is the only destructive mode and the caller has to ask for it by
+    name, so a paste can no longer wipe a schedule somebody has filled in.
+    """
+    stype = type_from_row(schedule.schedule_type)
+    incoming = [
+        ScheduleRow(
+            schedule_id=schedule.id,
+            position=0,
+            values=editable_payload(item.values, stype),
+        )
+        for item in payload.rows
+    ]
+
+    if payload.mode == "replace":
+        for row in list(schedule.rows):
+            session.delete(row)
+        session.flush()
+        ordered = incoming
+    else:
+        ordered = sorted(schedule.rows, key=lambda r: r.position)
+        at = len(ordered) if payload.mode == "append" else max(0, min(payload.position, len(ordered)))
+        ordered[at:at] = incoming
+
+    for row in incoming:
+        session.add(row)
+    _renumber(ordered)
+    session.flush()
+    session.expire(schedule, ["rows"])
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/rows/bulk", response_model=GridOut, deprecated=True)
 def replace_rows(
     payload: list[RowIn],
     schedule: Schedule = Depends(get_schedule),
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
 ) -> GridOut:
-    """Replace every row at once. Used by paste-from-Excel in the grid."""
+    """Replace every row at once. Superseded by /rows/paste with mode=replace."""
+    return paste_rows(
+        PasteIn(mode="replace", rows=payload), schedule, session, org
+    )
+
+
+@router.post("/{schedule_id}/rows/fill", response_model=GridOut)
+def fill_down(
+    payload: FillIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Fill one column down from a row, counting up where the value ends in digits.
+
+    The increment rule lives in core.references so the grid, an importer and a
+    bulk-add all produce the same thing.
+    """
     stype = type_from_row(schedule.schedule_type)
-    for row in list(schedule.rows):
-        session.delete(row)
-    session.flush()
-    for i, item in enumerate(payload):
-        session.add(
-            ScheduleRow(
-                schedule_id=schedule.id,
-                position=i,
-                values=editable_payload(item.values, stype),
-            )
+    column = stype.column(payload.column)
+    key = column.legacy_name if column is not None else payload.column
+    editable = {c.legacy_name for c in stype.inputs} | {"Model Reference"}
+    if key not in editable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{payload.column!r} is calculated or looked up, so it cannot be filled",
         )
+
+    ordered = sorted(schedule.rows, key=lambda r: r.position)
+    start = next((i for i, r in enumerate(ordered) if r.position == payload.start_position), None)
+    if start is None:
+        raise HTTPException(status_code=404, detail="no row at that position")
+
+    below = ordered[start + 1 :]
+    if payload.count is not None:
+        below = below[: max(0, payload.count)]
+    if not below:
+        return _grid(session, schedule, org)
+
+    seed = (ordered[start].values or {}).get(key, "")
+    for row, value in zip(below, fill_series(seed, len(below), mode=payload.mode)):
+        row.values = {**(row.values or {}), key: value}
+
     session.flush()
     session.expire(schedule, ["rows"])
     return _grid(session, schedule, org)
