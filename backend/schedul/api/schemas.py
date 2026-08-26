@@ -31,6 +31,9 @@ class ColumnIn(BaseModel):
     example: Any = ""
     formula: str | None = None
     note: str | None = None
+    #: Where this column appears: editor / xlsx / pdf. An absent key means
+    #: visible, so a payload written before visibility existed still works.
+    visibility: dict[str, bool] = Field(default_factory=dict)
 
 
 class TypeIn(BaseModel):
@@ -165,6 +168,8 @@ class GridColumn(BaseModel):
     formula: str | None = None
     note: str | None = None
     editable: bool
+    visibility: dict[str, bool] = Field(default_factory=dict)
+    project_extra: bool = False
 
 
 class RowOut(BaseModel):
@@ -173,6 +178,8 @@ class RowOut(BaseModel):
     values: dict[str, Any]
     computed: dict[str, Any]
     problems: dict[str, str] = Field(default_factory=dict)
+    #: Library columns this row deliberately diverges from.
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class GridOut(BaseModel):
@@ -190,6 +197,32 @@ class GridOut(BaseModel):
 class RowIn(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     position: int | None = None
+    #: Deliberate divergences from the equipment library, keyed by column name.
+    #: Sending an empty value clears the override and restores the library value.
+    overrides: dict[str, Any] | None = None
+
+
+class PasteIn(BaseModel):
+    """Rows pasted from a spreadsheet, and what to do with them.
+
+    Paste used to be replace-only, which made it an all-or-nothing destructive
+    action on a schedule someone had already filled in.
+    """
+
+    mode: Literal["replace", "append", "insert"] = "append"
+    rows: list[RowIn] = Field(default_factory=list)
+    #: Where 'insert' puts them. Ignored by the other modes.
+    position: int = 0
+
+
+class FillIn(BaseModel):
+    """Fill one column down from a starting row."""
+
+    column: str
+    start_position: int
+    #: How many rows below the start to fill. Omit to reach the end.
+    count: int | None = None
+    mode: Literal["series", "copy"] = "series"
 
 
 # -------------------------------------------------------------- revisions ---
@@ -210,6 +243,28 @@ class RevisionOut(RevisionIn):
     position: int
     sort_key: int
     is_current: bool = False
+    #: True once the revision has been issued and its state frozen.
+    issued: bool = False
+    issued_at: _dt.datetime | None = None
+
+
+class BulkRevisionIn(BaseModel):
+    """Append the same revision to many schedules at once.
+
+    Each schedule continues its own series rather than being forced to a shared
+    code, so a schedule already at P03 goes to P04 while one at P01 goes to P02.
+    """
+
+    schedule_ids: list[str] = Field(default_factory=list)
+    status: str = ""
+    issue_date: _dt.date | None = None
+    prepared_by: str = ""
+    checked_by: str = ""
+    approved_by: str = ""
+    description: str = ""
+    published: bool = False
+    issue: bool = False
+    apply: bool = False
 
 
 # -------------------------------------------------------------- equipment ---
@@ -300,6 +355,13 @@ class AuditOut(BaseModel):
     issues: list[dict[str, str]]
 
 
+class ProjectColumnsIn(BaseModel):
+    """The extra columns a project adds to one catalogue type."""
+
+    type_code: str
+    columns: list[ColumnIn] = Field(default_factory=list)
+
+
 class HouseStandardIn(BaseModel):
     name: str | None = None
     naming: dict[str, Any] | None = None
@@ -308,3 +370,9 @@ class HouseStandardIn(BaseModel):
     house_style: dict[str, Any] | None = None
     volume_lookup: dict[str, str] | None = None
     status_codes: list[list[str]] | None = None
+    #: Volume -> discipline. An empty dict clears it, leaving discipline
+    #: project-scoped; omitting the field leaves it as it was.
+    volume_discipline: dict[str, str] | None = None
+    #: 'building' or 'building_volume'.
+    numbering_scope: str | None = None
+    branding: dict[str, Any] | None = None

@@ -38,6 +38,8 @@ class CellValue:
     problem: str | None = None
     #: True when the user may type here.
     editable: bool = False
+    #: True for a library value this row deliberately diverges on.
+    overridden: bool = False
 
 
 @dataclass(slots=True)
@@ -93,6 +95,8 @@ def _column_spec(col: Column, editable: bool) -> dict[str, Any]:
         "formula": col.formula,
         "note": col.note,
         "editable": editable,
+        "visibility": dict(col.visibility),
+        "project_extra": col.project_extra,
     }
 
 
@@ -102,6 +106,7 @@ def compute_row(
     products: dict[str, dict[str, Any]],
     constants: dict[str, float],
     parsed: dict[str, Node] | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, CellValue]:
     """Compute one row: typed values, library lookups, then derived formulas.
 
@@ -125,7 +130,17 @@ def compute_row(
     product = products.get(model_ref) if model_ref else None
     missing = bool(model_ref) and product is None
 
+    overrides = overrides or {}
     for col in schedule_type.library:
+        # A deliberate override wins over the library, and over the absence of a
+        # model reference: the whole point is that this row diverges.
+        if col.legacy_name in overrides:
+            raw = overrides[col.legacy_name]
+            cells[col.legacy_name] = CellValue(
+                col.legacy_name, "library", raw, None, True, overridden=True
+            )
+            values[col.legacy_name] = BLANK if raw in (None, "") else raw
+            continue
         if not model_ref:
             cells[col.legacy_name] = CellValue(col.legacy_name, "library", None)
             values[col.legacy_name] = BLANK
@@ -194,7 +209,10 @@ def build_grid(
         grid.columns.append(_column_spec(col, editable))
 
     for row in schedule.rows:
-        cells = compute_row(row.values or {}, schedule_type, products, constants, parsed)
+        cells = compute_row(
+            row.values or {}, schedule_type, products, constants, parsed,
+            overrides=row.overrides or {},
+        )
         grid.rows.append(GridRow(id=row.id, position=row.position, cells=cells))
 
     return grid
@@ -220,6 +238,26 @@ def coerce(value: Any) -> Any:
         return value
     number = float(text)
     return int(number) if number.is_integer() and "." not in text else number
+
+
+def override_payload(
+    submitted: dict[str, Any], schedule_type: ScheduleType
+) -> dict[str, Any]:
+    """Keep only overrides naming a real library column, dropping blanks.
+
+    Clearing an override is how a row is reset to the library value, so an empty
+    string removes the key rather than storing an empty override.
+    """
+    library = {c.legacy_name: c for c in schedule_type.library}
+    cleaned: dict[str, Any] = {}
+    for key, value in (submitted or {}).items():
+        column = library.get(key) or next(
+            (c for c in schedule_type.library if c.name == key), None
+        )
+        if column is None or value in (None, ""):
+            continue
+        cleaned[column.legacy_name] = coerce(value)
+    return cleaned
 
 
 def editable_payload(stored: dict[str, Any], schedule_type: ScheduleType) -> dict[str, Any]:

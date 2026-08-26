@@ -91,10 +91,23 @@ class Column:
     example: Any = ""
     formula: str | None = None
     note: str | None = None
+    #: Where this column appears. An absent key means visible, so a catalogue
+    #: written before visibility existed needs no migration.
+    visibility: dict[str, bool] = _field(default_factory=dict)
+    #: True for a column a project added on top of the catalogue type.
+    project_extra: bool = False
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
         self.unit = plain_unit(self.unit.strip())
+
+    def visible_in(self, target: str) -> bool:
+        """Whether this column shows in ``editor``, ``xlsx`` or ``pdf``.
+
+        Lets a practice keep internal data such as ``Price`` on the schedule
+        without it reaching an issued document.
+        """
+        return self.visibility.get(target, True)
 
     @property
     def legacy_name(self) -> str:
@@ -112,6 +125,10 @@ class Column:
         if self.kind == "derived":
             out["formula"] = self.formula or ""
             out["note"] = self.note or ""
+        if self.visibility:
+            out["visibility"] = dict(self.visibility)
+        if self.project_extra:
+            out["project_extra"] = True
         return out
 
     @classmethod
@@ -124,6 +141,8 @@ class Column:
             example=data.get("example", ""),
             formula=data.get("formula") or None,
             note=data.get("note") or None,
+            visibility=dict(data.get("visibility") or {}),
+            project_extra=bool(data.get("project_extra", False)),
         )
 
 
@@ -171,6 +190,45 @@ class ScheduleType:
             if c.name == name or c.legacy_name == name:
                 return c
         return None
+
+    def visible_columns(self, target: str) -> "ScheduleType":
+        """A copy of this type carrying only the columns visible in ``target``.
+
+        Derived columns that reference a hidden column are kept, because the
+        formula still needs its operands; hiding is presentational, not a
+        removal from the model.
+        """
+        keep = [c for c in self.columns if c.visible_in(target)]
+        clone = ScheduleType(
+            code=self.code, title=self.title, short=self.short,
+            version=self.version, volume=self.volume, columns=keep,
+            notes=list(self.notes), created=self.created, updated=self.updated,
+            history=list(self.history),
+        )
+        return clone
+
+    def with_extras(self, extras: Sequence[Column]) -> "ScheduleType":
+        """This type plus a project's additional columns.
+
+        Additions only. A project cannot remove or reorder the catalogue's
+        columns, or two projects' schedules of the same type stop being
+        comparable and the catalogue stops meaning anything.
+        """
+        if not extras:
+            return self
+        existing = {c.legacy_name.lower() for c in self.columns}
+        added = [
+            Column(**{**c.to_dict(), "project_extra": True})
+            for c in extras
+            if c.legacy_name.lower() not in existing
+        ]
+        return ScheduleType(
+            code=self.code, title=self.title, short=self.short,
+            version=self.version, volume=self.volume,
+            columns=[*self.columns, *added],
+            notes=list(self.notes), created=self.created, updated=self.updated,
+            history=list(self.history),
+        )
 
     def layout(self) -> list[Column]:
         """Columns in physical left-to-right sheet order.

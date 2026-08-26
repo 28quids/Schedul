@@ -26,6 +26,7 @@ from ...export import pdf as pdf_export
 from ...export.projectinfo import render_project_info
 from ...export.schedule import ScheduleContent, render_schedule
 from ...services import projects as svc
+from ...services.columns import columns_for
 from ...services.converters import design_constants_for, revisions_of, type_from_row
 from ...services.grid import library_index
 from ..deps import current_org, get_db, get_project, get_schedule, not_found
@@ -34,15 +35,19 @@ from ..schemas import RegisterRow
 router = APIRouter(prefix="/api", tags=["export"])
 
 
-def _content(session: Session, schedule: Schedule, org: Organisation) -> ScheduleContent:
+def _content(
+    session: Session, schedule: Schedule, org: Organisation, *, target: str = "xlsx"
+) -> ScheduleContent:
     building = schedule.building
     project = building.project
     house = svc.house_standard_for(session, org.id)
     scheme = svc.naming_scheme_for(session, org.id)
-    stype = type_from_row(schedule.schedule_type)
+    # Columns hidden from this target never reach the deliverable, which is how
+    # a practice keeps internal data such as Price off an issued document.
+    stype = columns_for(schedule, target=target)
 
     try:
-        docnum = svc.document_number_for(schedule, scheme)
+        docnum = svc.document_number_for(schedule, scheme, house=house)
     except NamingError:
         docnum = schedule.docnum
 
@@ -59,6 +64,8 @@ def _content(session: Session, schedule: Schedule, org: Organisation) -> Schedul
         building_ref=building.ref,
         building_name=building.name,
         rows=[dict(r.values or {}) for r in schedule.rows],
+        overrides=[dict(r.overrides or {}) for r in schedule.rows],
+        theme=target,
         revisions=revisions_of(schedule),
         products=product_rows,
         doc_type=str(tokens.get("doc_type") or scheme.tokens["doc_type"].value),
@@ -69,9 +76,10 @@ def _content(session: Session, schedule: Schedule, org: Organisation) -> Schedul
 
 
 def _filename(session: Session, schedule: Schedule, org: Organisation) -> str:
-    scheme = svc.naming_scheme_for(session, org.id)
+    house = svc.house_standard_for(session, org.id)
+    scheme = svc.scheme_for(house)
     try:
-        return svc.filename_for(schedule, scheme)
+        return svc.filename_for(schedule, scheme, house=house)
     except NamingError:
         return f"{schedule.code}_{schedule.number}.xlsx"
 
@@ -114,6 +122,66 @@ def export_schedule_pdf(
     except pdf_export.PdfError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return FileResponse(produced, filename=produced.name, media_type="application/pdf")
+
+
+@router.get("/schedules/{schedule_id}/revisions/{revision_id}/export.xlsx")
+def export_issued_revision(
+    revision_id: str,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> FileResponse:
+    """Re-issue exactly what went out, from the snapshot rather than live data."""
+    from ...core.catalogue import Column, ScheduleType
+    from ...db.models import RevisionRow
+
+    revision = session.get(RevisionRow, revision_id)
+    if revision is None or revision.schedule_id != schedule.id:
+        raise not_found("revision")
+    if revision.snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"revision {revision.code} was never issued, so there is no frozen copy",
+        )
+
+    snap = revision.snapshot
+    house = svc.house_standard_for(session, org.id)
+    house.general_notes = list(snap.get("notes") or [])
+
+    stype = ScheduleType(
+        code=snap.get("type_code", schedule.code),
+        title=snap.get("type_title", schedule.code),
+        version=snap.get("type_version", 1),
+        columns=[Column.from_dict(c) for c in snap.get("columns", [])],
+        notes=[],
+    )
+
+    content = ScheduleContent(
+        schedule_type=stype,
+        house=house,
+        project_fields=snap.get("project_fields") or {},
+        design_constants=snap.get("design_constants") or {},
+        docnum=snap.get("docnum", ""),
+        building_ref=str(snap.get("building", "")).split(" - ")[0],
+        building_name=(
+            str(snap.get("building", "")).split(" - ", 1)[1]
+            if " - " in str(snap.get("building", "")) else ""
+        ),
+        rows=[r.get("values", {}) for r in snap.get("rows", [])],
+        overrides=[r.get("overrides", {}) for r in snap.get("rows", [])],
+        computed=[r.get("computed", {}) for r in snap.get("rows", [])],
+        frozen=True,
+        revisions=revisions_of(schedule),
+        theme="pdf",
+    )
+
+    tmp = Path(tempfile.mkdtemp(prefix="schedul-rev-"))
+    name = f"{snap.get('docnum') or schedule.code}_{revision.code}.xlsx"
+    path = render_schedule(content, tmp / name)
+    return FileResponse(
+        path, filename=name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @router.get("/projects/{project_id}/export.zip")
@@ -204,8 +272,8 @@ def register(
         for building in svc.buildings_of(session, project):
             for schedule in svc.live_schedules(session, building):
                 try:
-                    docnum = svc.document_number_for(schedule, scheme)
-                    filename = svc.filename_for(schedule, scheme)
+                    docnum = svc.document_number_for(schedule, scheme, house=house)
+                    filename = svc.filename_for(schedule, scheme, house=house)
                 except NamingError:
                     docnum, filename = schedule.docnum, ""
 
@@ -249,6 +317,101 @@ def register(
                     )
                 )
     return rows
+
+
+ROOM_HINTS = ("room number", "room", "space", "room served", "location", "area served")
+
+
+@router.get("/projects/{project_id}/rooms")
+def room_summary(
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Equipment grouped by the room or space it serves.
+
+    Answers "what is in RM8.64", which is the question the schedules already
+    hold the answer to but cannot be asked of them one file at a time. Which
+    column names a room varies by type, so the first input column whose name
+    looks like one is used, and which column was chosen is reported rather than
+    hidden -- a wrong guess should be visible.
+    """
+    from ...services.columns import columns_for
+
+    rooms: dict[str, list[dict[str, object]]] = {}
+    used_columns: dict[str, str] = {}
+    unassigned = 0
+
+    for building in svc.buildings_of(session, project):
+        for schedule in svc.live_schedules(session, building):
+            stype = columns_for(schedule)
+            room_column = _room_column(stype)
+            if room_column is None:
+                continue
+            used_columns[schedule.code] = room_column.name
+
+            reference = stype.inputs[0].legacy_name if stype.inputs else None
+            for row in schedule.rows:
+                values = row.values or {}
+                room = str(values.get(room_column.legacy_name, "") or "").strip()
+                if not room:
+                    if any(v not in (None, "") for v in values.values()):
+                        unassigned += 1
+                    continue
+                rooms.setdefault(room, []).append(
+                    {
+                        "building": building.label,
+                        "schedule_id": schedule.id,
+                        "code": schedule.code,
+                        "title": schedule.schedule_type.title if schedule.schedule_type else "",
+                        "reference": values.get(reference) if reference else None,
+                        "model_reference": values.get("Model Reference") or "",
+                    }
+                )
+
+    return {
+        "project": project.name or project.number,
+        "room_columns": used_columns,
+        "unassigned": unassigned,
+        "rooms": [
+            {
+                "room": room,
+                "count": len(items),
+                "by_type": _counted(items),
+                "items": sorted(items, key=lambda i: (i["code"], str(i["reference"] or ""))),
+            }
+            for room, items in sorted(rooms.items(), key=lambda kv: _natural(kv[0]))
+        ],
+    }
+
+
+def _room_column(stype):
+    """The input column that names a room, or None if this type has no such thing."""
+    for hint in ROOM_HINTS:
+        for column in stype.inputs:
+            if column.name.strip().lower() == hint:
+                return column
+    for column in stype.inputs:
+        if "room" in column.name.lower() or "space" in column.name.lower():
+            return column
+    return None
+
+
+def _counted(items: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[str(item["code"])] = counts.get(str(item["code"]), 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _natural(text: str) -> tuple:
+    """Sort 'RM2' before 'RM10', which plain string ordering gets backwards."""
+    import re
+
+    return tuple(
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", text)
+    )
 
 
 @router.get("/export/pdf-available")

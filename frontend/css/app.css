@@ -396,3 +396,43 @@ table.sheet tr:hover td.rowno { background: var(--grey-200); }
 }
 .strike { text-decoration: line-through; color: var(--grey-500); }
 .arrow { color: var(--grey-500); padding: 0 4px; }
+
+/* Rendered into <body> so the grid's overflow container cannot clip it. */
+.ac-list.ac-portal { position: fixed; z-index: 300; }
+
+.cell-flag {
+  border: none; background: none; cursor: pointer; padding: 0 4px;
+  color: var(--red); font-weight: 700; font-size: 12px; line-height: 1;
+}
+.cell-flag:hover { color: #8b1a21; }
+td.cell-input { position: relative; }
+td.cell-input .with-flag { display: flex; align-items: center; }
+td.cell-input .with-flag input { flex: 1; min-width: 0; }
+
+td.cell-selected input { box-shadow: inset 0 0 0 2px var(--blue); }
+.sheet-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.sheet-hint { font-size: 11.5px; color: var(--grey-600); }
+.saving { font-size: 11.5px; color: var(--grey-600); }
+.saving.err { color: var(--red); font-weight: 600; }
+
+/* A library value this row deliberately diverges from. */
+td.cell-overridden input { background: #eef6ff; color: var(--input-text); }
+td.cell-overridden { box-shadow: inset 2px 0 0 var(--blue); }
+.cell-override {
+  border: none; background: none; cursor: pointer; padding: 0 3px;
+  color: var(--grey-400); font-size: 11px; line-height: 1; visibility: hidden;
+}
+td.cell-library:hover .cell-override { visibility: visible; }
+.cell-override:hover { color: var(--blue-dark); }
+.cell-reset { color: var(--blue-dark); font-weight: 400; }
+td.cell-library { position: relative; }
+
+/* Drag the right edge of a preview column to set its width.
+   Scoped to the preview: a blanket `th { position: relative }` would override
+   the sticky positioning that keeps table headers in view everywhere else. */
+#designer-preview table.sheet thead th { position: relative; }
+#designer-preview .col-resize {
+  position: absolute; top: 0; right: -3px; width: 9px; height: 100%;
+  cursor: col-resize; background: transparent; z-index: 5;
+}
+#designer-preview .col-resize:hover { background: var(--blue); opacity: .5; }

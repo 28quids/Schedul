@@ -88,15 +88,22 @@ export const api = {
     renumber: (id, bid, body) =>
       request('POST', `/api/projects/${id}/buildings/${bid}/renumber`, body),
     audit: (id, bid) => request('GET', `/api/projects/${id}/buildings/${bid}/audit`),
+
+    bulkRevision: (id, body) => request('POST', `/api/projects/${id}/revisions/bulk`, body),
+    columns: (id, code) => request('GET', `/api/projects/${id}/columns/${code}`),
+    setColumns: (id, body) => request('PUT', `/api/projects/${id}/columns`, body),
   },
 
   schedules: {
     grid: (id) => request('GET', `/api/schedules/${id}`),
     addRow: (id, values) => request('POST', `/api/schedules/${id}/rows`, { values }),
-    updateRow: (id, rowId, values) =>
-      request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values }),
+    updateRow: (id, rowId, values, overrides) =>
+      request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values, overrides }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),
-    replaceRows: (id, rows) => request('POST', `/api/schedules/${id}/rows/bulk`, rows),
+    duplicateRow: (id, rowId) =>
+      request('POST', `/api/schedules/${id}/rows/${rowId}/duplicate`),
+    paste: (id, body) => request('POST', `/api/schedules/${id}/rows/paste`, body),
+    fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
 
     revisions: (id) => request('GET', `/api/schedules/${id}/revisions`),
     nextRevision: (id, published) =>
@@ -105,6 +112,11 @@ export const api = {
     updateRevision: (id, rid, body) =>
       request('PUT', `/api/schedules/${id}/revisions/${rid}`, body),
     deleteRevision: (id, rid) => request('DELETE', `/api/schedules/${id}/revisions/${rid}`),
+    issueRevision: (id, rid) =>
+      request('POST', `/api/schedules/${id}/revisions/${rid}/issue`),
+    snapshot: (id, rid) => request('GET', `/api/schedules/${id}/revisions/${rid}/snapshot`),
+    diff: (id, rid, against) =>
+      request('GET', `/api/schedules/${id}/revisions/${rid}/diff${against ? `?against=${against}` : ''}`),
   },
 
   catalogue: {

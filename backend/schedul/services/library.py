@@ -22,10 +22,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.catalogue import ScheduleType
-from ..db.models import Equipment, EquipmentFlag
+from ..db.models import Equipment, EquipmentChange, EquipmentFlag
 
 __all__ = [
     "DRIFT_RATIO",
+    "record_change",
+    "change_log",
+    "affected_schedules",
     "keynorm",
     "norm",
     "Finding",
@@ -206,13 +209,16 @@ def save_equipment(
         )
         session.add(entry)
         session.flush()
+        record_change(session, entry, "created", actor=created_by)
     else:
-        merged = dict(entry.values or {})
+        before = dict(entry.values or {})
+        merged = dict(before)
         merged.update({k: v for k, v in cleaned.items() if norm(v)})
         entry.values = merged
         if entry.review_state == "rejected":
             entry.review_state = "live"
         session.flush()
+        record_change(session, entry, "updated", before=before, actor=created_by)
 
     for finding in findings:
         if finding.kind == "DUPLICATE":
@@ -227,6 +233,124 @@ def save_equipment(
         )
     session.flush()
     return entry, findings
+
+
+def record_change(
+    session: Session,
+    entry: Equipment,
+    action: str,
+    *,
+    before: dict[str, Any] | None = None,
+    actor: str = "",
+) -> EquipmentChange | None:
+    """Record what changed on a library entry, if anything did.
+
+    An update that changes nothing is not worth a log line; recording it would
+    bury the changes that matter.
+    """
+    changed: dict[str, Any] = {}
+    if before is not None:
+        after = entry.values or {}
+        for key in {*before, *after}:
+            was, now = before.get(key), after.get(key)
+            if norm(was) != norm(now):
+                changed[key] = [was, now]
+        if not changed:
+            return None
+
+    record = EquipmentChange(
+        equipment_id=entry.id, action=action, changes=changed, actor=actor
+    )
+    session.add(record)
+    session.flush()
+    return record
+
+
+def change_log(
+    session: Session, organisation_id: str, *, type_code: str = "", limit: int = 100
+) -> list[dict[str, Any]]:
+    """Recent changes to this organisation's library, newest first."""
+    stmt = (
+        select(EquipmentChange, Equipment)
+        .join(Equipment, EquipmentChange.equipment_id == Equipment.id)
+        .where(Equipment.organisation_id == organisation_id)
+        .order_by(EquipmentChange.at.desc(), EquipmentChange.id.desc())
+        .limit(limit)
+    )
+    if type_code:
+        stmt = stmt.where(Equipment.type_code == type_code.strip().upper())
+
+    return [
+        {
+            "id": change.id,
+            "action": change.action,
+            "at": change.at,
+            "actor": change.actor,
+            "equipment_id": entry.id,
+            "type_code": entry.type_code,
+            "model_reference": entry.model_reference,
+            "changes": [
+                {"column": column, "before": pair[0], "after": pair[1]}
+                for column, pair in (change.changes or {}).items()
+            ],
+        }
+        for change, entry in session.execute(stmt).all()
+    ]
+
+
+def affected_schedules(
+    session: Session, organisation_id: str, equipment_id: str
+) -> list[dict[str, Any]]:
+    """Which schedules reference this product, and would move if it changed.
+
+    Because library values are read rather than copied, editing a product is not
+    a local act. This is how a reviewer sees the blast radius before doing it.
+    """
+    from ..db.models import Building, Project, Schedule, ScheduleRow
+
+    entry = session.get(Equipment, equipment_id)
+    if entry is None or entry.organisation_id != organisation_id:
+        return []
+
+    stmt = (
+        select(Schedule, Building, Project)
+        .join(Building, Schedule.building_id == Building.id)
+        .join(Project, Building.project_id == Project.id)
+        .where(
+            Project.organisation_id == organisation_id,
+            Schedule.deleted_marker == "",
+            Schedule.code == entry.type_code,
+        )
+    )
+
+    out: list[dict[str, Any]] = []
+    for schedule, building, project in session.execute(stmt).all():
+        rows = session.scalars(
+            select(ScheduleRow).where(ScheduleRow.schedule_id == schedule.id)
+        )
+        using = [
+            r for r in rows
+            if str((r.values or {}).get("Model Reference", "")) == entry.model_reference
+        ]
+        if not using:
+            continue
+        overridden = sum(
+            1 for r in using
+            if any(k in (r.overrides or {}) for k in (entry.values or {}))
+        )
+        out.append(
+            {
+                "schedule_id": schedule.id,
+                "code": schedule.code,
+                "project": project.number or project.name,
+                "building": building.label,
+                "rows": len(using),
+                # An overridden row keeps its own value, so a library change
+                # does not reach it.
+                "rows_overriding": overridden,
+            }
+        )
+    return out
 
 
 def review_queue(
@@ -297,4 +421,5 @@ def set_review_state(session: Session, equipment_id: str, state: str) -> Equipme
         for flag in entry.flags:
             flag.resolved = True
     session.flush()
+    record_change(session, entry, state)
     return entry

@@ -337,3 +337,490 @@ class TestExport:
         assert response.status_code == 200
         assert response.content[:5] == b"%PDF-"
         assert len(response.content) > 5000
+
+
+class TestGridOperations:
+    """Phase 1 editing: duplicate, paste modes and fill-down."""
+
+    @pytest.fixture()
+    def schedule(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        return result["buildings"][0]["schedules"][0]["id"]
+
+    def add(self, client, schedule, **values):
+        return client.post(
+            f"/api/schedules/{schedule}/rows", json={"values": values}
+        ).json()
+
+    def test_duplicate_copies_the_row_and_inserts_it_below(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "MVHR-01", "Supply Airflow (l/s)": 450})
+        self.add(client, schedule, **{"Unit Reference": "MVHR-99"})
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        first = grid["rows"][0]["id"]
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/{first}/duplicate").json()
+        refs = [r["values"].get("Unit Reference") for r in grid["rows"]]
+        assert refs == ["MVHR-01", "MVHR-01", "MVHR-99"], "the copy sits directly below"
+        assert grid["rows"][1]["values"]["Supply Airflow (l/s)"] == 450
+        assert [r["position"] for r in grid["rows"]] == [0, 1, 2]
+
+    def test_paste_append_keeps_existing_rows(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "MVHR-01"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "append",
+            "rows": [{"values": {"Unit Reference": "MVHR-02"}}],
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["MVHR-01", "MVHR-02"]
+
+    def test_paste_insert_puts_rows_at_a_position(self, client, schedule):
+        for ref in ("A", "C"):
+            self.add(client, schedule, **{"Unit Reference": ref})
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "insert", "position": 1,
+            "rows": [{"values": {"Unit Reference": "B"}}],
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["A", "B", "C"]
+
+    def test_paste_replace_is_the_only_destructive_mode(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "OLD"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "replace",
+            "rows": [{"values": {"Unit Reference": "NEW"}}],
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["NEW"]
+
+    def test_pasted_numbers_are_still_coerced(self, client, schedule):
+        grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "append",
+            "rows": [{"values": {"Unit Reference": "A", "Supply Airflow (l/s)": "450"}}],
+        }).json()
+        assert grid["rows"][0]["values"]["Supply Airflow (l/s)"] == 450
+
+    def test_fill_down_increments_a_reference(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "MVHR-001"})
+        for _ in range(3):
+            self.add(client, schedule)
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Unit Reference", "start_position": 0, "mode": "series",
+        }).json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == [
+            "MVHR-001", "MVHR-002", "MVHR-003", "MVHR-004",
+        ]
+
+    def test_fill_down_copies_plain_text(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "A", "Location": "Roof Plantroom"})
+        self.add(client, schedule, **{"Unit Reference": "B"})
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Location", "start_position": 0,
+        }).json()
+        assert [r["values"].get("Location") for r in grid["rows"]] == [
+            "Roof Plantroom", "Roof Plantroom",
+        ]
+
+    def test_fill_down_refuses_a_computed_column(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "A"})
+        self.add(client, schedule)
+        response = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Total Airflow (l/s)", "start_position": 0,
+        })
+        assert response.status_code == 400
+        assert "calculated" in response.json()["detail"]
+
+    def test_fill_down_recomputes_derived_columns(self, client, schedule):
+        self.add(client, schedule, **{
+            "Unit Reference": "A", "Supply Airflow (l/s)": 450, "Extract Airflow (l/s)": 450,
+        })
+        self.add(client, schedule, **{"Unit Reference": "B", "Extract Airflow (l/s)": 450})
+
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "column": "Supply Airflow (l/s)", "start_position": 0, "mode": "copy",
+        }).json()
+        assert grid["rows"][1]["computed"]["Total Airflow (l/s)"] == 900
+
+
+class TestColumnModelEndToEnd:
+    """Visibility and overrides all the way to a recalculated workbook."""
+
+    @pytest.fixture()
+    def schedule(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        return result["buildings"][0]["schedules"][0]["id"]
+
+    def test_a_project_column_appears_in_the_editor(self, client, project, schedule):
+        client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{"kind": "input", "name": "Quantity", "width": 10, "example": 2}],
+        }).raise_for_status()
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        quantity = [c for c in grid["columns"] if c["name"] == "Quantity"]
+        assert quantity and quantity[0]["project_extra"] is True
+        assert quantity[0]["editable"] is True
+
+    def test_a_project_column_holds_data_and_exports(self, client, project, schedule, tmp_path):
+        client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{"kind": "input", "name": "Quantity", "width": 10, "example": 2}],
+        })
+        client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01", "Quantity": 3,
+        }})
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert grid["rows"][0]["values"]["Quantity"] == 3
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        headers = [c.value for c in load_workbook(path)["Schedule"][4]]
+        assert "Quantity" in headers
+
+    def test_a_column_shadowing_a_base_column_is_refused(self, client, project):
+        response = client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{"kind": "input", "name": "Location"}],
+        })
+        assert response.status_code == 400
+        assert "already exists" in str(response.json()["detail"])
+
+    def test_a_hidden_column_stays_out_of_the_workbook(self, client, project, schedule, tmp_path):
+        client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{
+                "kind": "input", "name": "Price", "width": 10,
+                "visibility": {"xlsx": False, "pdf": False},
+            }],
+        }).raise_for_status()
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert any(c["name"] == "Price" for c in grid["columns"]), "visible in the editor"
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        headers = [c.value for c in load_workbook(path)["Schedule"][4]]
+        assert "Price" not in headers, "internal data must not reach the deliverable"
+
+    def test_an_override_survives_to_the_workbook_as_a_value(
+        self, client, project, schedule, tmp_path
+    ):
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair", "Length (mm)": 1200},
+        })
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Length (mm)": 1400},
+        }).json()
+
+        assert grid["rows"][0]["computed"]["Length (mm)"] == 1400
+        assert grid["rows"][0]["computed"]["Manufacturer"] == "Systemair"
+        assert grid["rows"][0]["overrides"] == {"Length (mm)": 1400}
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        sheet = load_workbook(path)["Schedule"]
+        header = [c.value for c in sheet[4]]
+        length_col = header.index("Length") + 1
+        manufacturer_col = header.index("Manufacturer") + 1
+
+        # The overridden cell is a literal; leaving the formula would discard it.
+        assert sheet.cell(6, length_col).value == 1400
+        assert str(sheet.cell(6, manufacturer_col).value).startswith("=IF(")
+
+    def test_clearing_an_override_restores_the_library_value(self, client, schedule):
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Length (mm)": 1200},
+        })
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Length (mm)": 1400},
+        }).json()
+        row = grid["rows"][0]["id"]
+
+        grid = client.put(f"/api/schedules/{schedule}/rows/{row}", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Length (mm)": ""},
+        }).json()
+        assert grid["rows"][0]["overrides"] == {}
+        assert grid["rows"][0]["computed"]["Length (mm)"] == 1200
+
+    @needs_soffice
+    def test_the_workbook_still_agrees_with_the_grid_under_an_override(
+        self, client, schedule, tmp_path
+    ):
+        """The seam again: an override must not make the two disagree."""
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair"},
+        })
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {
+                "Unit Reference": "M-1", "Model Reference": "SYS-1",
+                "Supply Airflow (l/s)": 500, "Extract Airflow (l/s)": 500,
+                "Total Power Input (W)": 400,
+            },
+            "overrides": {"Manufacturer": "Vent-Axia"},
+        }).json()
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        sheets = recalculate(path)
+        excel = dict(zip(sheets["Schedule"][3], sheets["Schedule"][5]))
+
+        computed = grid["rows"][0]["computed"]
+        assert excel["Manufacturer"] == computed["Manufacturer"] == "Vent-Axia"
+        assert float(excel["Total Airflow"]) == float(computed["Total Airflow (l/s)"]) == 1000
+
+
+class TestRegisterAndRooms:
+    @pytest.fixture()
+    def populated(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "RAD"},
+        ).json()
+        sid = result["buildings"][0]["schedules"][0]["id"]
+        for ref, room in [("RAD-001", "RM8.64"), ("RAD-002", "RM8.64"), ("RAD-003", "RM2")]:
+            client.post(f"/api/schedules/{sid}/rows", json={"values": {
+                "Radiator Reference": ref, "Room Served": room,
+            }})
+        return project["id"]
+
+    def test_rooms_group_equipment(self, client, populated):
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        rooms = {r["room"]: r for r in data["rooms"]}
+        assert rooms["RM8.64"]["count"] == 2
+        assert rooms["RM8.64"]["by_type"] == {"RAD": 2}
+        assert rooms["RM2"]["count"] == 1
+
+    def test_rooms_sort_naturally(self, client, populated):
+        """RM2 before RM8.64, which plain string ordering gets backwards."""
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        assert [r["room"] for r in data["rooms"]] == ["RM2", "RM8.64"]
+
+    def test_which_column_was_used_is_reported(self, client, populated):
+        """A wrong guess about which column names a room should be visible."""
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        assert data["room_columns"]["RAD"] == "Room Served"
+
+    def test_rows_with_no_room_are_counted_not_hidden(self, client, populated):
+        schedule = client.get("/api/register").json()[0]["schedule_id"]
+        client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Radiator Reference": "RAD-099"},
+        })
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        assert data["unassigned"] == 1
+
+    def test_the_register_carries_what_search_needs(self, client, populated):
+        row = client.get("/api/register").json()[0]
+        for key in ("project_name", "project_number", "building", "code",
+                    "document_number", "file_name", "status", "revision"):
+            assert key in row
+
+
+class TestNumberingRules:
+    """P2.15: discipline from volume, and optional per-volume sequences."""
+
+    def set_house(self, client, **changes):
+        return client.put("/api/settings", json=changes)
+
+    def test_discipline_follows_the_volume(self, client, project):
+        """MVHR is ventilation so mechanical; EWH is domestic services so
+        public health. Neither is set on the project."""
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "EWH"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        by_code = {
+            s["code"]: s["docnum"]
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        }
+        assert "-5_7-" in by_code["MVHR"] and "-M-" in by_code["MVHR"]
+        assert "-5_3-" in by_code["EWH"] and "-P-" in by_code["EWH"]
+
+    def test_a_project_override_still_wins_over_the_volume(self, client, project):
+        """Resolution is schedule > building > type > project, so a project that
+        needs one discipline throughout can still say so."""
+        client.put(f"/api/projects/{project['id']}", json={
+            "name": project["name"], "number": project["number"],
+            "client": project["client"], "riba_stage": "Stage 4",
+            "naming_overrides": {"discipline": "E"},
+        })
+        building = project["buildings"][0]["id"]
+        client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "EWH"},
+        )
+        docnum = client.get(f"/api/projects/{project['id']}").json()[
+            "buildings"][0]["schedules"][0]["docnum"]
+        assert "-E-" in docnum and "-P-" not in docnum
+
+    def test_clearing_the_lookup_leaves_discipline_project_scoped(self, client, project):
+        self.set_house(client, volume_discipline={})
+        building = project["buildings"][0]["id"]
+        client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "EWH"},
+        )
+        docnum = client.get(f"/api/projects/{project['id']}").json()[
+            "buildings"][0]["schedules"][0]["docnum"]
+        assert "-M-" in docnum, "falls back to the project token"
+
+    def test_numbering_is_per_building_by_default(self, client, project):
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "EWH", "AHU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        numbers = [
+            s["number"]
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        ]
+        assert numbers == [10, 11, 12], "one sequence, whatever the volume"
+
+    def test_per_volume_numbering_gives_each_volume_its_own_sequence(
+        self, client, project
+    ):
+        self.set_house(client, numbering_scope="building_volume")
+        building = project["buildings"][0]["id"]
+        # MVHR and AHU are 5.7; EWH is 5.3.
+        for code in ("MVHR", "EWH", "AHU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        by_code = {
+            s["code"]: s
+            for s in client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        }
+        assert by_code["MVHR"]["number"] == 10
+        assert by_code["AHU"]["number"] == 11, "second in the 5.7 sequence"
+        assert by_code["EWH"]["number"] == 10, "5.3 starts its own sequence"
+        assert by_code["MVHR"]["docnum"] != by_code["EWH"]["docnum"]
+
+    def test_a_retired_number_is_scoped_to_its_volume(self, client, project):
+        self.set_house(client, numbering_scope="building_volume")
+        building = project["buildings"][0]["id"]
+        for code in ("MVHR", "AHU"):
+            client.post(
+                f"/api/projects/{project['id']}/buildings/{building}/schedules",
+                json={"code": code},
+            )
+        schedules = client.get(f"/api/projects/{project['id']}").json()["buildings"][0]["schedules"]
+        ahu = [s for s in schedules if s["code"] == "AHU"][0]
+        client.delete(f"/api/projects/{project['id']}/schedules/{ahu['id']}")
+
+        # 11 is retired in 5.7, so another ventilation type gets 12...
+        client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "SUPGRILLE"},
+        )
+        # ...but 5.3 is untouched and still starts at 10.
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "EWH"},
+        ).json()
+        by_code = {s["code"]: s["number"] for s in result["buildings"][0]["schedules"]}
+        assert by_code["SUPGRILLE"] == 12
+        assert by_code["EWH"] == 10
+
+    def test_the_start_number_is_configurable(self, client, project):
+        """Numbering can begin at 1 without a code change."""
+        settings = client.get("/api/settings").json()["house_standard"]
+        naming = settings["naming"]
+        naming["tokens"]["number"]["start"] = 1
+        self.set_house(client, naming=naming)
+
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        schedule = result["buildings"][0]["schedules"][0]
+        assert schedule["number"] == 1
+        assert "-00000001-" in schedule["docnum"]
+
+
+class TestLibraryAudit:
+    """P1.7: what changed in the library, and where it landed."""
+
+    @pytest.fixture()
+    def setup(self, client, project) -> dict:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        sid = result["buildings"][0]["schedules"][0]["id"]
+        entry = client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemari"}, "created_by": "AG",
+        }).json()
+        client.post(f"/api/schedules/{sid}/rows", json={"values": {
+            "Unit Reference": "M-1", "Model Reference": "SYS-1",
+        }})
+        return {"schedule": sid, "entry": entry["id"]}
+
+    def test_creating_an_entry_is_logged(self, client, setup):
+        log = client.get("/api/library/review/changes").json()
+        assert log[-1]["action"] == "created"
+        assert log[-1]["model_reference"] == "SYS-1"
+        assert log[-1]["actor"] == "AG"
+
+    def test_an_edit_records_what_moved(self, client, setup):
+        client.put(f"/api/library/{setup['entry']}", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair"}, "created_by": "LJ",
+        })
+        change = client.get("/api/library/review/changes").json()[0]
+        assert change["action"] == "updated"
+        assert change["changes"] == [
+            {"column": "Manufacturer", "before": "Systemari", "after": "Systemair"}
+        ]
+
+    def test_an_edit_that_changes_nothing_is_not_logged(self, client, setup):
+        before = len(client.get("/api/library/review/changes").json())
+        client.put(f"/api/library/{setup['entry']}", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemari"},
+        })
+        assert len(client.get("/api/library/review/changes").json()) == before
+
+    def test_the_blast_radius_is_visible(self, client, setup):
+        """Editing a product is not a local act; this is what it would touch."""
+        impact = client.get(f"/api/library/{setup['entry']}/affected").json()
+        assert impact["total_rows"] == 1
+        assert impact["schedules"][0]["code"] == "MVHR"
+        assert impact["schedules"][0]["rows"] == 1
+
+    def test_an_overriding_row_is_counted_separately(self, client, setup):
+        """A row that overrides the value would not move, so say so."""
+        row = client.get(f"/api/schedules/{setup['schedule']}").json()["rows"][0]["id"]
+        client.put(f"/api/schedules/{setup['schedule']}/rows/{row}", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Manufacturer": "Vent-Axia"},
+        })
+        impact = client.get(f"/api/library/{setup['entry']}/affected").json()
+        assert impact["rows_overriding"] == 1
+
+    def test_approving_is_logged(self, client, setup):
+        client.post(f"/api/library/review/{setup['entry']}/approved")
+        assert client.get("/api/library/review/changes").json()[0]["action"] == "approved"
+
+    def test_the_log_can_be_filtered_by_type(self, client, setup):
+        assert client.get("/api/library/review/changes?type_code=MVHR").json()
+        assert client.get("/api/library/review/changes?type_code=AHU").json() == []

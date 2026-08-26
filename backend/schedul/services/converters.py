@@ -85,6 +85,7 @@ def context_for(
     *,
     number: int | None = None,
     scheme: NamingScheme | None = None,
+    house: HouseStandard | None = None,
 ) -> ResolutionContext:
     """Assemble the token layers for one schedule.
 
@@ -103,6 +104,17 @@ def context_for(
 
     if schedule_type is not None and schedule_type.volume and scheme is not None:
         ctx.type = volume_context(schedule_type.volume, scheme)
+        # Discipline follows the volume where the house standard says it does:
+        # ventilation is mechanical, drainage is public health.
+        #
+        # Only when the project has not set one explicitly. Resolution puts the
+        # type layer above the project layer, so supplying it unconditionally
+        # would make a deliberate project-wide discipline impossible to express
+        # -- the derived value is a sensible default, not a mandate.
+        if house is not None and "discipline" not in (project.naming_overrides or {}):
+            discipline = house.discipline_for(schedule_type.volume)
+            if discipline:
+                ctx.type["discipline"] = discipline
 
     if schedule is not None:
         ctx.schedule = {

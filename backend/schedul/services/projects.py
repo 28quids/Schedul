@@ -130,6 +130,7 @@ def document_number_for(
     scheme: NamingScheme,
     *,
     number: int | None = None,
+    house: HouseStandard | None = None,
 ) -> str:
     """Derive a schedule's document number from the tokens, live.
 
@@ -139,17 +140,25 @@ def document_number_for(
     building = schedule.building
     project = building.project
     st = type_from_row(schedule.schedule_type)
-    ctx = context_for(project, building, st, schedule, number=number, scheme=scheme)
+    ctx = context_for(
+        project, building, st, schedule, number=number, scheme=scheme, house=house
+    )
     return scheme.document_number(ctx)
 
 
 def filename_for(
-    schedule: Schedule, scheme: NamingScheme, *, number: int | None = None
+    schedule: Schedule,
+    scheme: NamingScheme,
+    *,
+    number: int | None = None,
+    house: HouseStandard | None = None,
 ) -> str:
     building = schedule.building
     project = building.project
     st = type_from_row(schedule.schedule_type)
-    ctx = context_for(project, building, st, schedule, number=number, scheme=scheme)
+    ctx = context_for(
+        project, building, st, schedule, number=number, scheme=scheme, house=house
+    )
     return scheme.filename(ctx, st.title)
 
 
@@ -248,14 +257,22 @@ def add_schedule(session: Session, building: Building, code: str) -> Schedule:
             f"one schedule of each type per building is the rule"
         )
 
-    scheme = naming_scheme_for(session, project.organisation_id)
+    house = house_standard_for(session, project.organisation_id)
+    scheme = scheme_for(house)
     number_token = scheme.tokens.get("number")
     start = (number_token.start if number_token else None) or 10
     width = (number_token.width if number_token else None) or 8
 
-    refs = [schedule_ref(s) for s in live_schedules(session, building)]
+    # With per-volume numbering, 5.2-00001 and 5.3-00001 are separate sequences,
+    # so only schedules sharing this volume constrain the next number.
+    volume = type_row.volume or ""
+    scoped = [
+        s for s in live_schedules(session, building)
+        if not house.numbers_per_volume or (s.volume or "") == volume
+    ]
+    refs = [schedule_ref(s) for s in scoped]
     number, warnings = numbering.allocate(
-        refs, building.retired_numbers or [], start=start, width=width
+        refs, retired_numbers(building, volume, house), start=start, width=width
     )
 
     schedule = Schedule(
@@ -263,6 +280,7 @@ def add_schedule(session: Session, building: Building, code: str) -> Schedule:
         schedule_type_id=type_row.id,
         code=type_row.code,
         number=number,
+        volume=volume,
         type_version=type_row.version,
         state="allocated",
     )
@@ -272,7 +290,7 @@ def add_schedule(session: Session, building: Building, code: str) -> Schedule:
     # Refresh the relationship so the document number can be derived.
     session.refresh(schedule)
     try:
-        schedule.docnum = document_number_for(schedule, scheme)
+        schedule.docnum = document_number_for(schedule, scheme, house=house)
     except NamingError:
         # An incomplete token set is a project-setup problem, not a reason to
         # refuse the schedule; the audit and the preview both report it.
@@ -283,6 +301,35 @@ def add_schedule(session: Session, building: Building, code: str) -> Schedule:
     return schedule
 
 
+def retired_numbers(
+    building: Building, volume: str, house: HouseStandard
+) -> list[int]:
+    """Numbers given up in this building, scoped to a volume when configured.
+
+    Stored either as a flat list (one sequence per building) or as a dict keyed
+    by volume. Both shapes are read here so a database written before per-volume
+    numbering existed keeps working without a migration step of its own.
+    """
+    stored = building.retired_numbers or []
+    if isinstance(stored, dict):
+        if house.numbers_per_volume:
+            return list(stored.get(volume or "", []))
+        return sorted({n for numbers in stored.values() for n in numbers})
+    return list(stored)
+
+
+def _retire(building: Building, volume: str, number: int, house: HouseStandard) -> None:
+    """Record a number as given up, in whichever shape this building uses."""
+    stored = building.retired_numbers or []
+    if house.numbers_per_volume or isinstance(stored, dict):
+        as_dict = dict(stored) if isinstance(stored, dict) else {"": list(stored)}
+        key = volume or ""
+        as_dict[key] = numbering.retire(as_dict.get(key, []), number)
+        building.retired_numbers = as_dict
+    else:
+        building.retired_numbers = numbering.retire(stored, number)
+
+
 def archive_schedule(session: Session, schedule: Schedule) -> Schedule:
     """Remove a schedule from the record, retiring its number.
 
@@ -291,9 +338,8 @@ def archive_schedule(session: Session, schedule: Schedule) -> Schedule:
     identity that may already have been issued.
     """
     building = schedule.building
-    building.retired_numbers = numbering.retire(
-        building.retired_numbers or [], schedule.number
-    )
+    house = house_standard_for(session, building.project.organisation_id)
+    _retire(building, schedule.volume or "", schedule.number, house)
     schedule.deleted_marker = schedule.id
     schedule.archived_at = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
     session.flush()
@@ -330,12 +376,13 @@ def restore_schedule(session: Session, schedule: Schedule) -> Schedule:
 
 def schedule_refs(session: Session, building: Building) -> list[ScheduleRef]:
     """The numbering view of a building's live schedules."""
-    scheme = naming_scheme_for(session, building.project.organisation_id)
+    house = house_standard_for(session, building.project.organisation_id)
+    scheme = scheme_for(house)
     refs = []
     for s in live_schedules(session, building):
         try:
-            docnum = document_number_for(s, scheme)
-            filename = filename_for(s, scheme)
+            docnum = document_number_for(s, scheme, house=house)
+            filename = filename_for(s, scheme, house=house)
         except NamingError:
             docnum, filename = s.docnum, ""
         refs.append(schedule_ref(s, docnum=docnum, filename=filename))
@@ -344,15 +391,16 @@ def schedule_refs(session: Session, building: Building) -> list[ScheduleRef]:
 
 def _renderer_for(session: Session, building: Building):
     """Recompute (docnum, filename) for a schedule at a proposed number."""
-    scheme = naming_scheme_for(session, building.project.organisation_id)
+    house = house_standard_for(session, building.project.organisation_id)
+    scheme = scheme_for(house)
     by_code = {s.code: s for s in live_schedules(session, building)}
 
     def render(ref: ScheduleRef, number: int) -> tuple[str, str]:
         schedule = by_code[ref.code]
         try:
             return (
-                document_number_for(schedule, scheme, number=number),
-                filename_for(schedule, scheme, number=number),
+                document_number_for(schedule, scheme, number=number, house=house),
+                filename_for(schedule, scheme, number=number, house=house),
             )
         except NamingError:
             return "", ""
@@ -416,12 +464,13 @@ def apply_plan(session: Session, building: Building, plan: RenumberPlan) -> int:
         parked -= 1
     session.flush()
 
-    scheme = naming_scheme_for(session, building.project.organisation_id)
+    house = house_standard_for(session, building.project.organisation_id)
+    scheme = scheme_for(house)
     for change in moves:
         schedule = by_code[change.code]
         schedule.number = change.new_number
         try:
-            schedule.docnum = document_number_for(schedule, scheme)
+            schedule.docnum = document_number_for(schedule, scheme, house=house)
         except NamingError:
             schedule.docnum = ""
     session.flush()
@@ -430,13 +479,14 @@ def apply_plan(session: Session, building: Building, plan: RenumberPlan) -> int:
 
 
 def _names_with_building_ref(
-    schedule: Schedule, scheme: NamingScheme, ref: str
+    schedule: Schedule, scheme: NamingScheme, ref: str,
+    house: HouseStandard | None = None,
 ) -> tuple[str, str]:
     """The document number and filename this schedule would have under ``ref``."""
     building = schedule.building
     project = building.project
     st = type_from_row(schedule.schedule_type)
-    ctx = context_for(project, building, st, schedule, scheme=scheme)
+    ctx = context_for(project, building, st, schedule, scheme=scheme, house=house)
     ctx.building = {**ctx.building, "building": ref}
     return scheme.document_number(ctx), scheme.filename(ctx, st.title)
 
@@ -450,13 +500,14 @@ def rename_building_plan(
     flow. It touches that building and nothing else, which is what makes it safe
     on a live multi-block job.
     """
-    scheme = naming_scheme_for(session, building.project.organisation_id)
+    house = house_standard_for(session, building.project.organisation_id)
+    scheme = scheme_for(house)
     plan = RenumberPlan(operation=f"rename building {building.ref} to {new_ref}")
 
     for schedule in live_schedules(session, building):
         try:
-            old_doc = document_number_for(schedule, scheme)
-            old_name = filename_for(schedule, scheme)
+            old_doc = document_number_for(schedule, scheme, house=house)
+            old_name = filename_for(schedule, scheme, house=house)
         except NamingError:
             old_doc, old_name = schedule.docnum, ""
 
@@ -464,7 +515,7 @@ def rename_building_plan(
         # mutating the building: a query during the preview would autoflush the
         # temporary ref straight into the database.
         try:
-            new_doc, new_name = _names_with_building_ref(schedule, scheme, new_ref)
+            new_doc, new_name = _names_with_building_ref(schedule, scheme, new_ref, house)
         except NamingError:
             new_doc, new_name = "", ""
 
@@ -504,10 +555,11 @@ def apply_building_rename(
         )
 
     building.ref = new_ref.strip()
-    scheme = naming_scheme_for(session, project.organisation_id)
+    house = house_standard_for(session, project.organisation_id)
+    scheme = scheme_for(house)
     for schedule in live_schedules(session, building):
         try:
-            schedule.docnum = document_number_for(schedule, scheme)
+            schedule.docnum = document_number_for(schedule, scheme, house=house)
         except NamingError:
             schedule.docnum = ""
     session.flush()
@@ -516,7 +568,8 @@ def apply_building_rename(
 
 def run_audit(session: Session, building: Building) -> list[numbering.AuditIssue]:
     """Health check for one building. Run before any export or renumber."""
-    scheme = naming_scheme_for(session, building.project.organisation_id)
+    house = house_standard_for(session, building.project.organisation_id)
+    scheme = scheme_for(house)
     refs = schedule_refs(session, building)
 
     expected: dict[str, str] = {}
@@ -524,7 +577,7 @@ def run_audit(session: Session, building: Building) -> list[numbering.AuditIssue
     latest: dict[str, int] = {}
     for s in live_schedules(session, building):
         try:
-            expected[s.code] = document_number_for(s, scheme)
+            expected[s.code] = document_number_for(s, scheme, house=house)
         except NamingError:
             pass
         pinned[s.code] = s.type_version

@@ -48,6 +48,7 @@ __all__ = [
     "RevisionRow",
     "Equipment",
     "EquipmentFlag",
+    "EquipmentChange",
 ]
 
 
@@ -179,6 +180,10 @@ class Project(TimestampMixin, Base):
     naming_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     #: Overrides the house standard's design constants for this job.
     design_constants: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: Extra columns this project adds on top of a catalogue type, keyed by type
+    #: code. Additions only -- a project cannot remove or reorder base columns,
+    #: or two projects' schedules of the same type stop being comparable.
+    type_extras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     organisation: Mapped[Organisation] = relationship(back_populates="projects")
     buildings: Mapped[list["Building"]] = relationship(
@@ -266,8 +271,13 @@ class Schedule(TimestampMixin, Base):
         UniqueConstraint(
             "building_id", "code", "deleted_marker", name="uq_schedule_code_per_building"
         ),
+        # Volume is part of the key so per-volume sequences can coexist:
+        # 5.2-00001 and 5.3-00001 are different documents. With numbering scoped
+        # to the building, every schedule shares one volume slot in practice
+        # because allocation never hands out a duplicate.
         UniqueConstraint(
-            "building_id", "number", "deleted_marker", name="uq_schedule_number_per_building"
+            "building_id", "volume", "number", "deleted_marker",
+            name="uq_schedule_number_per_building",
         ),
     )
 
@@ -289,6 +299,10 @@ class Schedule(TimestampMixin, Base):
     state: Mapped[str] = mapped_column(String(20), default="allocated", nullable=False)
     #: Schedule-scope token overrides. Rare, but the most specific scope.
     naming_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: The volume this schedule was allocated under, copied from the type at
+    #: creation. Denormalised so numbering can scope to it and so changing a
+    #: type's volume later cannot silently re-file an existing schedule.
+    volume: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     #: '' while live; the schedule's own id once archived. See __table_args__.
     deleted_marker: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     archived_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
@@ -328,6 +342,13 @@ class ScheduleRow(TimestampMixin, Base):
     )
     position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: Library values this row deliberately diverges from, keyed by column name.
+    #:
+    #: Kept separate from ``values`` on purpose. Anything a client sends for a
+    #: library column is stripped, because accepting it would let a stale or
+    #: forged computed value be stored and rendered as fact. A value here is
+    #: unambiguously a deliberate override, which keeps that guard intact.
+    overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     schedule: Mapped[Schedule] = relationship(back_populates="rows")
 
@@ -358,7 +379,20 @@ class RevisionRow(TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     sort_key: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
 
+    #: When this revision was issued, and what the schedule looked like then.
+    #:
+    #: A snapshot holds the computed values as well as the typed ones, which is
+    #: what stops a later library correction or formula fix changing the meaning
+    #: of a document that has already gone out. Null until the revision is
+    #: issued; such revisions render live and are labelled as doing so.
+    issued_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     schedule: Mapped[Schedule] = relationship(back_populates="revisions")
+
+    @property
+    def is_issued(self) -> bool:
+        return self.snapshot is not None
 
 
 # ------------------------------------------------------- equipment library ---
@@ -402,6 +436,43 @@ class Equipment(TimestampMixin, Base):
     flags: Mapped[list["EquipmentFlag"]] = relationship(
         back_populates="equipment", cascade="all, delete-orphan"
     )
+    change_log: Mapped[list["EquipmentChange"]] = relationship(
+        back_populates="equipment",
+        cascade="all, delete-orphan",
+        order_by="EquipmentChange.at.desc()",
+    )
+
+
+class EquipmentChange(TimestampMixin, Base):
+    """One recorded change to a library entry.
+
+    Library values are read rather than copied, so correcting a product changes
+    every schedule that uses it at once. That is the feature, and it is also why
+    a practice needs to be able to see what changed and where it landed.
+    """
+
+    __tablename__ = "equipment_change"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    equipment_id: Mapped[str] = mapped_column(
+        ForeignKey("equipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Recorded in Python rather than by the database clock: SQLite's now() has
+    #: one-second resolution, so several changes in the same second would tie
+    #: and the log would come back in an arbitrary order.
+    at: Mapped[_dt.datetime] = mapped_column(
+        DateTime,
+        default=lambda: _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
+        nullable=False,
+        index=True,
+    )
+    #: created | updated | approved | rejected | restored
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: {column: [before, after]} for an update.
+    changes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), default="")
+
+    equipment: Mapped["Equipment"] = relationship(back_populates="change_log")
 
 
 class EquipmentFlag(TimestampMixin, Base):
