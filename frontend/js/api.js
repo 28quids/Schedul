@@ -100,10 +100,18 @@ export const api = {
     updateRow: (id, rowId, values, overrides) =>
       request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values, overrides }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),
+    deleteRows: (id, rowIds) =>
+      request('POST', `/api/schedules/${id}/rows/delete`, { row_ids: rowIds }),
     duplicateRow: (id, rowId) =>
       request('POST', `/api/schedules/${id}/rows/${rowId}/duplicate`),
+    editCells: (id, edits, action = 'cells') =>
+      request('POST', `/api/schedules/${id}/rows/cells`, { edits, action }),
     paste: (id, body) => request('POST', `/api/schedules/${id}/rows/paste`, body),
+    pastePreview: (id, body) =>
+      request('POST', `/api/schedules/${id}/rows/paste/preview`, body),
     fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
+    undo: (id) => request('POST', `/api/schedules/${id}/undo`),
+    redo: (id) => request('POST', `/api/schedules/${id}/redo`),
 
     revisions: (id) => request('GET', `/api/schedules/${id}/revisions`),
     nextRevision: (id, published) =>

@@ -12,6 +12,7 @@ __all__ = [
     "BuildingIn", "BuildingOut",
     "ScheduleIn", "ScheduleOut",
     "RowIn", "RowOut", "GridOut", "GridColumn",
+    "PasteIn", "PastePreviewIn", "CellEdit", "CellsIn", "DeleteRowsIn", "FillIn",
     "RevisionIn", "RevisionOut",
     "EquipmentIn", "EquipmentOut",
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
@@ -192,6 +193,14 @@ class GridOut(BaseModel):
     building_ref: str = ""
     building_count: int = 1
     notes: list[str] = Field(default_factory=list)
+    #: The resolved note layers, each carrying where it came from.
+    note_layers: list[dict[str, Any]] = Field(default_factory=list)
+    #: True when this schedule has its own notes rather than inheriting.
+    notes_customised: bool = False
+    #: Whether undo and redo are available, and of what.
+    history: dict[str, Any] = Field(default_factory=dict)
+    #: Set when the type has moved on since this schedule was built.
+    type_drift: dict[str, Any] = Field(default_factory=dict)
 
 
 class RowIn(BaseModel):
@@ -206,23 +215,79 @@ class PasteIn(BaseModel):
     """Rows pasted from a spreadsheet, and what to do with them.
 
     Paste used to be replace-only, which made it an all-or-nothing destructive
-    action on a schedule someone had already filled in.
+    action on a schedule someone had already filled in. It now defaults to
+    appending, and the one mode that removes anything has to say so twice: once
+    by naming itself, and once by confirming the preview.
+
+    ``text`` is the raw clipboard block. Parsing it here rather than in the
+    browser is what lets the preview and the apply agree exactly -- they run the
+    same planner over the same text.
     """
 
     mode: Literal["replace", "append", "insert"] = "append"
     rows: list[RowIn] = Field(default_factory=list)
+    #: Raw tab-separated text. Takes precedence over ``rows`` when given.
+    text: str = ""
+    #: True/False forces the header decision; None detects one.
+    header: bool | None = None
     #: Where 'insert' puts them. Ignored by the other modes.
+    position: int = 0
+    #: Required before a replace may remove rows that carry typed values.
+    confirm: bool = False
+
+
+class PastePreviewIn(BaseModel):
+    """A paste to plan but not perform."""
+
+    mode: Literal["replace", "append", "insert"] = "append"
+    text: str = ""
+    header: bool | None = None
     position: int = 0
 
 
-class FillIn(BaseModel):
-    """Fill one column down from a starting row."""
+class CellEdit(BaseModel):
+    """One row's worth of a multi-cell edit.
 
-    column: str
+    Values are merged into the row rather than replacing it, so a rectangular
+    paste or a range delete touches only the columns it names.
+    """
+
+    row_id: str
+    values: dict[str, Any] = Field(default_factory=dict)
+    overrides: dict[str, Any] | None = None
+
+
+class CellsIn(BaseModel):
+    """A block of cell edits applied as one undoable step."""
+
+    edits: list[CellEdit] = Field(default_factory=list)
+    #: What to call this in the undo stack.
+    action: str = "cells"
+
+
+class DeleteRowsIn(BaseModel):
+    """Delete several rows at once, as one undoable step."""
+
+    row_ids: list[str] = Field(default_factory=list)
+
+
+class FillIn(BaseModel):
+    """Fill one or more columns down from a starting row.
+
+    ``columns`` fills a selected block; ``column`` remains for the single-column
+    case and for callers written before ranges existed.
+    """
+
+    column: str = ""
+    columns: list[str] = Field(default_factory=list)
     start_position: int
     #: How many rows below the start to fill. Omit to reach the end.
     count: int | None = None
     mode: Literal["series", "copy"] = "series"
+
+    @property
+    def target_columns(self) -> list[str]:
+        return self.columns or ([self.column] if self.column else [])
 
 
 # -------------------------------------------------------------- revisions ---

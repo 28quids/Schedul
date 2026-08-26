@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
+from .upgrade import upgrade
 
 __all__ = ["DATA_DIR", "database_url", "make_engine", "SessionLocal", "get_session", "init_db"]
 
@@ -60,15 +61,22 @@ def _ensure() -> sessionmaker[Session]:
     if SessionLocal is None:
         _engine = make_engine()
         Base.metadata.create_all(_engine)
+        upgrade(_engine)
         SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return SessionLocal
 
 
 def init_db(url: str | None = None) -> Engine:
-    """Create the schema. Safe to call repeatedly."""
+    """Create the schema, and add any column a previous version did not have.
+
+    Safe to call repeatedly. The upgrade step is additive only -- see
+    ``db/upgrade.py`` -- so starting a newer build against an existing database
+    cannot lose anything already in it.
+    """
     global _engine, SessionLocal
     _engine = make_engine(url)
     Base.metadata.create_all(_engine)
+    upgrade(_engine)
     SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return _engine
 
