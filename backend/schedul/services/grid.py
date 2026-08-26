@@ -13,6 +13,7 @@ without touching any row.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as _field
 from typing import Any, Iterable, Sequence
 
@@ -199,6 +200,28 @@ def build_grid(
     return grid
 
 
+#: A value that is unambiguously a number. Leading zeros are excluded on
+#: purpose: '0123' is a reference someone typed, not the number 123.
+_NUMERIC = re.compile(r"^-?(0|[1-9]\d*)(\.\d+)?$")
+
+
+def coerce(value: Any) -> Any:
+    """Turn a numeric-looking string into a number, leaving anything else alone.
+
+    A duty typed into a web form arrives as text. Stored as text it would reach
+    the exported workbook as text: left-aligned, ignored by SUM, and awkward in
+    any formula an engineer adds later. Converting here means the database and
+    the workbook both hold a real number.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or not _NUMERIC.match(text):
+        return value
+    number = float(text)
+    return int(number) if number.is_integer() and "." not in text else number
+
+
 def editable_payload(stored: dict[str, Any], schedule_type: ScheduleType) -> dict[str, Any]:
     """Strip a submitted row down to the columns the user is allowed to set.
 
@@ -208,11 +231,13 @@ def editable_payload(stored: dict[str, Any], schedule_type: ScheduleType) -> dic
     allowed = {c.legacy_name for c in schedule_type.inputs} | {MODEL_REFERENCE}
     cleaned: dict[str, Any] = {}
     for key, value in (stored or {}).items():
+        # The Model Reference is a key, never a quantity: coercing it would turn
+        # a numeric product code into a number and break the lookup.
         if key in allowed:
-            cleaned[key] = value
+            cleaned[key] = value if key == MODEL_REFERENCE else coerce(value)
         else:
             # Accept the bare name too, so a client using display names works.
             match = schedule_type.column(key)
             if match is not None and match.kind == "input":
-                cleaned[match.legacy_name] = value
+                cleaned[match.legacy_name] = coerce(value)
     return cleaned
