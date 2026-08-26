@@ -88,13 +88,16 @@ export const api = {
     renumber: (id, bid, body) =>
       request('POST', `/api/projects/${id}/buildings/${bid}/renumber`, body),
     audit: (id, bid) => request('GET', `/api/projects/${id}/buildings/${bid}/audit`),
+
+    columns: (id, code) => request('GET', `/api/projects/${id}/columns/${code}`),
+    setColumns: (id, body) => request('PUT', `/api/projects/${id}/columns`, body),
   },
 
   schedules: {
     grid: (id) => request('GET', `/api/schedules/${id}`),
     addRow: (id, values) => request('POST', `/api/schedules/${id}/rows`, { values }),
-    updateRow: (id, rowId, values) =>
-      request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values }),
+    updateRow: (id, rowId, values, overrides) =>
+      request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values, overrides }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),
     duplicateRow: (id, rowId) =>
       request('POST', `/api/schedules/${id}/rows/${rowId}/duplicate`),

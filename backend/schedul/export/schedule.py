@@ -120,10 +120,12 @@ class ScheduleContent:
         building_ref: str = "",
         building_name: str = "",
         rows: Sequence[dict[str, Any]] = (),
+        overrides: Sequence[dict[str, Any]] = (),
         revisions: Sequence[Revision] = (),
         products: Sequence[dict[str, Any]] = (),
         doc_type: str = "SC",
         classification: str = "",
+        theme: str = "xlsx",
     ) -> None:
         self.schedule_type = schedule_type
         self.house = house
@@ -133,10 +135,27 @@ class ScheduleContent:
         self.building_ref = building_ref
         self.building_name = building_name
         self.rows = list(rows)
+        self.overrides = list(overrides)
+        #: 'xlsx' keeps the editing colours so the file stays workable; 'pdf'
+        #: uses the issue theme, because an issued document should not look like
+        #: somebody's editing screen.
+        self.theme = theme
         self.revisions = list(revisions)
         self.products = list(products)
         self.doc_type = doc_type
         self.classification = classification
+
+    @property
+    def issue_theme(self) -> bool:
+        """Whether to render plainly, as an issued document rather than a form."""
+        return self.theme == "pdf"
+
+    def overrides_for(self, index: int) -> dict[str, Any]:
+        return self.overrides[index] if index < len(self.overrides) else {}
+
+    @property
+    def branding(self) -> dict[str, Any]:
+        return self.house.branding or {}
 
     @property
     def building_label(self) -> str:
@@ -164,6 +183,17 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     st = _Style(content.house.house_style)
     hs = content.house.house_style
     stype = content.schedule_type
+
+    # An issued document is read, not filled in. The yellow input fill and the
+    # blue/green/black colour contract are editing aids; carrying them onto a
+    # PDF that goes to a client makes it look like a working file.
+    issue = content.issue_theme
+    fill_in = PatternFill("solid", fgColor="FFFFFF") if issue else FILL_IN
+    grp_in = FILL_HDR if issue else FILL_GRP_IN
+    grp_lib = FILL_HDR if issue else FILL_GRP_LIB
+    grp_calc = FILL_HDR if issue else FILL_GRP_CALC
+    font_in = st.f_sm if issue else st.f_in
+    font_pull = st.f_sm if issue else st.f_pull
 
     inputs = stype.inputs
     library = stype.library
@@ -389,8 +419,8 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
         for i in range(1, 8):
             c = rv.cell(r0, i)
             c.border = BOX
-            c.font = st.f_rev_in
-            c.fill = FILL_IN
+            c.font = st.f_sm if issue else st.f_rev_in
+            c.fill = fill_in
             c.alignment = LFT
         rv.cell(r0, 3).number_format = "DD/MM/YYYY"
         # 1000 + n for Pnn, 2000 + n for Cnn, 0 for an empty or unreadable row.
@@ -457,6 +487,11 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
             f"='Revision page'!B{summary_rows['Revision']}&\"  \"&"
             f"'Revision page'!B{summary_rows['Suitability Status']}",
         ),
+        # Who signed it off. The revision page already derives these from the
+        # log; the cover is where a reader looks first.
+        (23, "Prepared by", f"='Revision page'!B{summary_rows['Prepared by']}"),
+        (26, "Checked by", f"='Revision page'!B{summary_rows['Checked by']}"),
+        (29, "Approved by", f"='Revision page'!B{summary_rows['Approved by']}"),
     ]
     for label_row, label, value in cover_pairs:
         fcv.cell(label_row, 1, label).font = st.f_cov_sm
@@ -483,6 +518,8 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     fcv["A43"].font = st.f_cov_val
     fcv["A43"].alignment = LFT
 
+    _apply_branding(fcv, content)
+
     _page(fcv, landscape=False)
     fcv.print_area = "A1:G50"
 
@@ -491,13 +528,28 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     HDR, UNIT, DAT = 4, 5, 6
     data_bot = DAT + data_rows - 1
 
+    def measured(col, index: int, minimum: float) -> float:
+        """Width that fits the header and the longest value actually present.
+
+        The declared width is a hint from the designer, but a column of
+        'ISO ePM1 60%' under a header of 'Supply Filter Grade' arrives clipped if
+        nothing looks at the content. The header wraps over two lines, so it is
+        allowed to count for half its length.
+        """
+        longest = max((len(str(v)) for v in _column_values(content, col)), default=0)
+        header = max(len(w) for w in col.name.split()) if col.name else 0
+        wrapped_header = max(header, len(col.name) / 2)
+        return min(max(col.width * 0.8, minimum, longest + 2, wrapped_header + 2), 42)
+
     for i, col in enumerate(inputs, start=1):
-        sc.column_dimensions[get_column_letter(i)].width = max(col.width * 0.8, 7)
-    sc.column_dimensions[get_column_letter(mr_col)].width = 20
+        sc.column_dimensions[get_column_letter(i)].width = measured(col, i, 7)
+    sc.column_dimensions[get_column_letter(mr_col)].width = max(
+        20, min(42, max((len(str(r.get(MODEL_REFERENCE, ""))) for r in content.rows), default=0) + 2)
+    )
     for i, col in enumerate(library, start=typ_start):
-        sc.column_dimensions[get_column_letter(i)].width = max(col.width * 0.8, 8)
+        sc.column_dimensions[get_column_letter(i)].width = measured(col, i, 8)
     for i, col in enumerate(derived, start=der_start):
-        sc.column_dimensions[get_column_letter(i)].width = max(col.width * 0.8, 8)
+        sc.column_dimensions[get_column_letter(i)].width = measured(col, i, 8)
 
     last_col = get_column_letter(n_cols)
     sc.merge_cells(f"A1:{last_col}1")
@@ -513,9 +565,7 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     sc.row_dimensions[3].height = 46
 
     all_columns = [*inputs, None, *library, *derived]  # None marks Model Reference
-    fills = [FILL_GRP_IN] * mr_col + [FILL_GRP_LIB] * len(library) + [
-        FILL_GRP_CALC
-    ] * len(derived)
+    fills = [grp_in] * mr_col + [grp_lib] * len(library) + [grp_calc] * len(derived)
     for i, col in enumerate(all_columns, start=1):
         name = MODEL_REFERENCE if col is None else col.name
         unit = "" if col is None else col.unit
@@ -547,8 +597,8 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
             c.alignment = LFT
             c.font = st.f_sm
         for i in range(1, mr_col + 1):
-            sc.cell(r0, i).font = st.f_in
-            sc.cell(r0, i).fill = FILL_IN
+            sc.cell(r0, i).font = font_in
+            sc.cell(r0, i).fill = fill_in
 
         for j, col in enumerate(library):
             lc = get_column_letter(2 + j)
@@ -563,7 +613,7 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
             c.value = (
                 f'=IF(${mrl}{r0}="","",IFERROR(IF({lookup}="","",{lookup}),"NOT FOUND"))'
             )
-            c.font = st.f_pull
+            c.font = font_pull
 
         for j, col in enumerate(derived):
             c = sc.cell(r0, der_start + j)
@@ -591,6 +641,15 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
         ref = row.get(MODEL_REFERENCE)
         if ref:
             sc.cell(r0, mr_col, ref)
+
+        # A row that deliberately diverges from the library carries the literal
+        # value instead of the INDEX/MATCH formula. Leaving the formula would
+        # silently discard the override the moment the file is opened.
+        row_overrides = content.overrides_for(k)
+        for j, col in enumerate(library):
+            if col.legacy_name in row_overrides:
+                cell = sc.cell(r0, typ_start + j, row_overrides[col.legacy_name])
+                cell.font = st.f_in if not issue else st.f_sm
 
     if not content.rows:
         for i, col in enumerate(inputs, start=1):
@@ -642,6 +701,58 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     return out
+
+
+def _column_values(content: ScheduleContent, col) -> Iterable[Any]:
+    """Every value that will land in this column, for width measurement."""
+    key, name = col.legacy_name, col.name
+    if col.kind == "input":
+        for row in content.rows:
+            value = row.get(key, row.get(name))
+            if value not in (None, ""):
+                yield value
+    elif col.kind == "library":
+        for product in content.products:
+            value = product.get(key, product.get(name))
+            if value not in (None, ""):
+                yield value
+    if col.unit:
+        yield col.unit
+
+
+def _apply_branding(cover, content: ScheduleContent) -> None:
+    """Put the organisation's logo and title colours on the cover.
+
+    openpyxl cannot write shapes, but it *can* write images -- so a logo is the
+    one piece of branding that survives generation. The house cover's drawn
+    elements still need the cover-template route.
+    """
+    branding = content.branding
+    logo = branding.get("logo")
+    if not logo:
+        return
+
+    import base64
+    import io
+
+    try:
+        from openpyxl.drawing.image import Image as XlImage
+    except ImportError:  # Pillow missing
+        return
+
+    try:
+        raw = logo.split(",", 1)[1] if logo.startswith("data:") else logo
+        stream = io.BytesIO(base64.b64decode(raw))
+        image = XlImage(stream)
+    except Exception:
+        # A broken logo must not stop a schedule being issued.
+        return
+
+    scale = float(branding.get("logo_scale") or 1.0)
+    if scale and scale != 1.0:
+        image.width = int(image.width * scale)
+        image.height = int(image.height * scale)
+    cover.add_image(image, branding.get("logo_anchor") or "A1")
 
 
 def _pretty(unit: str) -> str:

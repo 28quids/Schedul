@@ -442,3 +442,141 @@ class TestGridOperations:
             "column": "Supply Airflow (l/s)", "start_position": 0, "mode": "copy",
         }).json()
         assert grid["rows"][1]["computed"]["Total Airflow (l/s)"] == 900
+
+
+class TestColumnModelEndToEnd:
+    """Visibility and overrides all the way to a recalculated workbook."""
+
+    @pytest.fixture()
+    def schedule(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        return result["buildings"][0]["schedules"][0]["id"]
+
+    def test_a_project_column_appears_in_the_editor(self, client, project, schedule):
+        client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{"kind": "input", "name": "Quantity", "width": 10, "example": 2}],
+        }).raise_for_status()
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        quantity = [c for c in grid["columns"] if c["name"] == "Quantity"]
+        assert quantity and quantity[0]["project_extra"] is True
+        assert quantity[0]["editable"] is True
+
+    def test_a_project_column_holds_data_and_exports(self, client, project, schedule, tmp_path):
+        client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{"kind": "input", "name": "Quantity", "width": 10, "example": 2}],
+        })
+        client.post(f"/api/schedules/{schedule}/rows", json={"values": {
+            "Unit Reference": "MVHR-01", "Quantity": 3,
+        }})
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert grid["rows"][0]["values"]["Quantity"] == 3
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        headers = [c.value for c in load_workbook(path)["Schedule"][4]]
+        assert "Quantity" in headers
+
+    def test_a_column_shadowing_a_base_column_is_refused(self, client, project):
+        response = client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{"kind": "input", "name": "Location"}],
+        })
+        assert response.status_code == 400
+        assert "already exists" in str(response.json()["detail"])
+
+    def test_a_hidden_column_stays_out_of_the_workbook(self, client, project, schedule, tmp_path):
+        client.put(f"/api/projects/{project['id']}/columns", json={
+            "type_code": "MVHR",
+            "columns": [{
+                "kind": "input", "name": "Price", "width": 10,
+                "visibility": {"xlsx": False, "pdf": False},
+            }],
+        }).raise_for_status()
+
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert any(c["name"] == "Price" for c in grid["columns"]), "visible in the editor"
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        headers = [c.value for c in load_workbook(path)["Schedule"][4]]
+        assert "Price" not in headers, "internal data must not reach the deliverable"
+
+    def test_an_override_survives_to_the_workbook_as_a_value(
+        self, client, project, schedule, tmp_path
+    ):
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair", "Length (mm)": 1200},
+        })
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Length (mm)": 1400},
+        }).json()
+
+        assert grid["rows"][0]["computed"]["Length (mm)"] == 1400
+        assert grid["rows"][0]["computed"]["Manufacturer"] == "Systemair"
+        assert grid["rows"][0]["overrides"] == {"Length (mm)": 1400}
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        sheet = load_workbook(path)["Schedule"]
+        header = [c.value for c in sheet[4]]
+        length_col = header.index("Length") + 1
+        manufacturer_col = header.index("Manufacturer") + 1
+
+        # The overridden cell is a literal; leaving the formula would discard it.
+        assert sheet.cell(6, length_col).value == 1400
+        assert str(sheet.cell(6, manufacturer_col).value).startswith("=IF(")
+
+    def test_clearing_an_override_restores_the_library_value(self, client, schedule):
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Length (mm)": 1200},
+        })
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Length (mm)": 1400},
+        }).json()
+        row = grid["rows"][0]["id"]
+
+        grid = client.put(f"/api/schedules/{schedule}/rows/{row}", json={
+            "values": {"Unit Reference": "M-1", "Model Reference": "SYS-1"},
+            "overrides": {"Length (mm)": ""},
+        }).json()
+        assert grid["rows"][0]["overrides"] == {}
+        assert grid["rows"][0]["computed"]["Length (mm)"] == 1200
+
+    @needs_soffice
+    def test_the_workbook_still_agrees_with_the_grid_under_an_override(
+        self, client, schedule, tmp_path
+    ):
+        """The seam again: an override must not make the two disagree."""
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-1",
+            "values": {"Manufacturer": "Systemair"},
+        })
+        grid = client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {
+                "Unit Reference": "M-1", "Model Reference": "SYS-1",
+                "Supply Airflow (l/s)": 500, "Extract Airflow (l/s)": 500,
+                "Total Power Input (W)": 400,
+            },
+            "overrides": {"Manufacturer": "Vent-Axia"},
+        }).json()
+
+        path = tmp_path / "x.xlsx"
+        path.write_bytes(client.get(f"/api/schedules/{schedule}/export.xlsx").content)
+        sheets = recalculate(path)
+        excel = dict(zip(sheets["Schedule"][3], sheets["Schedule"][5]))
+
+        computed = grid["rows"][0]["computed"]
+        assert excel["Manufacturer"] == computed["Manufacturer"] == "Vent-Axia"
+        assert float(excel["Total Airflow"]) == float(computed["Total Airflow (l/s)"]) == 1000

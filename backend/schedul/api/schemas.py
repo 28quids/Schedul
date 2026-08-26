@@ -31,6 +31,9 @@ class ColumnIn(BaseModel):
     example: Any = ""
     formula: str | None = None
     note: str | None = None
+    #: Where this column appears: editor / xlsx / pdf. An absent key means
+    #: visible, so a payload written before visibility existed still works.
+    visibility: dict[str, bool] = Field(default_factory=dict)
 
 
 class TypeIn(BaseModel):
@@ -165,6 +168,8 @@ class GridColumn(BaseModel):
     formula: str | None = None
     note: str | None = None
     editable: bool
+    visibility: dict[str, bool] = Field(default_factory=dict)
+    project_extra: bool = False
 
 
 class RowOut(BaseModel):
@@ -173,6 +178,8 @@ class RowOut(BaseModel):
     values: dict[str, Any]
     computed: dict[str, Any]
     problems: dict[str, str] = Field(default_factory=dict)
+    #: Library columns this row deliberately diverges from.
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class GridOut(BaseModel):
@@ -190,6 +197,9 @@ class GridOut(BaseModel):
 class RowIn(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     position: int | None = None
+    #: Deliberate divergences from the equipment library, keyed by column name.
+    #: Sending an empty value clears the override and restores the library value.
+    overrides: dict[str, Any] | None = None
 
 
 class PasteIn(BaseModel):
@@ -321,6 +331,13 @@ class AuditOut(BaseModel):
     building_id: str
     building: str
     issues: list[dict[str, str]]
+
+
+class ProjectColumnsIn(BaseModel):
+    """The extra columns a project adds to one catalogue type."""
+
+    type_code: str
+    columns: list[ColumnIn] = Field(default_factory=list)
 
 
 class HouseStandardIn(BaseModel):

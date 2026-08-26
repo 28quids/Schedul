@@ -26,6 +26,7 @@ from ...export import pdf as pdf_export
 from ...export.projectinfo import render_project_info
 from ...export.schedule import ScheduleContent, render_schedule
 from ...services import projects as svc
+from ...services.columns import columns_for
 from ...services.converters import design_constants_for, revisions_of, type_from_row
 from ...services.grid import library_index
 from ..deps import current_org, get_db, get_project, get_schedule, not_found
@@ -34,12 +35,16 @@ from ..schemas import RegisterRow
 router = APIRouter(prefix="/api", tags=["export"])
 
 
-def _content(session: Session, schedule: Schedule, org: Organisation) -> ScheduleContent:
+def _content(
+    session: Session, schedule: Schedule, org: Organisation, *, target: str = "xlsx"
+) -> ScheduleContent:
     building = schedule.building
     project = building.project
     house = svc.house_standard_for(session, org.id)
     scheme = svc.naming_scheme_for(session, org.id)
-    stype = type_from_row(schedule.schedule_type)
+    # Columns hidden from this target never reach the deliverable, which is how
+    # a practice keeps internal data such as Price off an issued document.
+    stype = columns_for(schedule, target=target)
 
     try:
         docnum = svc.document_number_for(schedule, scheme)
@@ -59,6 +64,8 @@ def _content(session: Session, schedule: Schedule, org: Organisation) -> Schedul
         building_ref=building.ref,
         building_name=building.name,
         rows=[dict(r.values or {}) for r in schedule.rows],
+        overrides=[dict(r.overrides or {}) for r in schedule.rows],
+        theme=target,
         revisions=revisions_of(schedule),
         products=product_rows,
         doc_type=str(tokens.get("doc_type") or scheme.tokens["doc_type"].value),

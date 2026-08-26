@@ -179,6 +179,10 @@ class Project(TimestampMixin, Base):
     naming_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     #: Overrides the house standard's design constants for this job.
     design_constants: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: Extra columns this project adds on top of a catalogue type, keyed by type
+    #: code. Additions only -- a project cannot remove or reorder base columns,
+    #: or two projects' schedules of the same type stop being comparable.
+    type_extras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     organisation: Mapped[Organisation] = relationship(back_populates="projects")
     buildings: Mapped[list["Building"]] = relationship(
@@ -289,6 +293,10 @@ class Schedule(TimestampMixin, Base):
     state: Mapped[str] = mapped_column(String(20), default="allocated", nullable=False)
     #: Schedule-scope token overrides. Rare, but the most specific scope.
     naming_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: The volume this schedule was allocated under, copied from the type at
+    #: creation. Denormalised so numbering can scope to it and so changing a
+    #: type's volume later cannot silently re-file an existing schedule.
+    volume: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     #: '' while live; the schedule's own id once archived. See __table_args__.
     deleted_marker: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     archived_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
@@ -328,6 +336,13 @@ class ScheduleRow(TimestampMixin, Base):
     )
     position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: Library values this row deliberately diverges from, keyed by column name.
+    #:
+    #: Kept separate from ``values`` on purpose. Anything a client sends for a
+    #: library column is stripped, because accepting it would let a stale or
+    #: forged computed value be stored and rendered as fact. A value here is
+    #: unambiguously a deliberate override, which keeps that guard intact.
+    overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     schedule: Mapped[Schedule] = relationship(back_populates="rows")
 
@@ -358,7 +373,20 @@ class RevisionRow(TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     sort_key: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
 
+    #: When this revision was issued, and what the schedule looked like then.
+    #:
+    #: A snapshot holds the computed values as well as the typed ones, which is
+    #: what stops a later library correction or formula fix changing the meaning
+    #: of a document that has already gone out. Null until the revision is
+    #: issued; such revisions render live and are labelled as doing so.
+    issued_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     schedule: Mapped[Schedule] = relationship(back_populates="revisions")
+
+    @property
+    def is_issued(self) -> bool:
+        return self.snapshot is not None
 
 
 # ------------------------------------------------------- equipment library ---

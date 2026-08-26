@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...core.numbering import RenumberPlan
-from ...db.models import Building, Organisation, Project, Schedule
+from ...db.models import Building, Organisation, Project, Schedule, ScheduleTypeRow
 from ...services import projects as svc
 from ...services.projects import ServiceError
 from ..deps import (
@@ -22,6 +22,7 @@ from ..deps import (
 )
 from ..schemas import (
     BuildingIn,
+    ProjectColumnsIn,
     BuildingOut,
     CloneIn,
     PlanChange,
@@ -288,6 +289,89 @@ def list_archived(
         )
         out.extend(schedule_view(session, s, scheme, house) for s in archived)
     return out
+
+
+# --------------------------------------------------------- extra columns ---
+
+
+@router.get("/{project_id}/columns/{type_code}")
+def read_project_columns(
+    type_code: str,
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """The base type's columns and this project's additions to them."""
+    from ...core.catalogue import ScheduleType
+    from ...services.columns import merged_type, project_extras
+    from ...services.converters import type_from_row
+
+    row = session.scalar(
+        select(ScheduleTypeRow).where(
+            ScheduleTypeRow.organisation_id == org.id,
+            ScheduleTypeRow.code == type_code.strip().upper(),
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no schedule type {type_code!r}")
+
+    base = type_from_row(row)
+    return {
+        "type_code": base.code,
+        "title": base.title,
+        "base_columns": [c.to_dict() for c in base.columns],
+        "extra_columns": [c.to_dict() for c in project_extras(project, base.code)],
+        "merged": [c.to_dict() for c in merged_type(project, base).columns],
+    }
+
+
+@router.put("/{project_id}/columns", response_model=ProjectOut)
+def set_project_columns(
+    payload: ProjectColumnsIn,
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> ProjectOut:
+    """Add columns to one schedule type, for this project only.
+
+    Additions only: the base type's columns cannot be removed or reordered here,
+    because two projects' schedules of the same type have to stay comparable.
+    Validation runs against the merged list, so a project-specific derived
+    column may reference the base columns and is checked properly.
+    """
+    from ...core.catalogue import Column, validate_type
+    from ...services.columns import merged_type, set_project_extras
+    from ...services.converters import type_from_row
+
+    row = session.scalar(
+        select(ScheduleTypeRow).where(
+            ScheduleTypeRow.organisation_id == org.id,
+            ScheduleTypeRow.code == payload.type_code.strip().upper(),
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no schedule type {payload.type_code!r}")
+
+    base = type_from_row(row)
+    extras = [Column(**c.model_dump()) for c in payload.columns]
+
+    clash = {c.legacy_name.lower() for c in base.columns} & {
+        c.legacy_name.lower() for c in extras
+    }
+    if clash:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(sorted(clash))} already exists on the {base.code} type",
+        )
+
+    candidate = base.with_extras(extras)
+    errors = [i.message for i in validate_type(candidate) if i.severity == "error"]
+    if errors:
+        raise HTTPException(status_code=400, detail=errors)
+
+    set_project_extras(project, base.code, extras)
+    session.flush()
+    return project_view(session, project, org)
 
 
 # ------------------------------------------------------------- numbering ---

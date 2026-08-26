@@ -136,6 +136,8 @@ class HouseStandard:
         default_factory=lambda: dict(DEFAULT_DESIGN_CONSTANTS)
     )
     cover_template: str = ""
+    #: Per-organisation branding applied to the cover and revision page.
+    branding: dict[str, Any] = _field(default_factory=dict)
 
     def volume_label(self, volume: str) -> str:
         """``'5.7'`` -> ``'Ventilation'``, or the code itself if unknown."""
@@ -159,6 +161,7 @@ class HouseStandard:
             "general_notes": self.general_notes,
             "design_constants": self.design_constants,
             "cover_template": self.cover_template,
+            "branding": self.branding,
         }
 
     @classmethod
@@ -175,6 +178,7 @@ class HouseStandard:
             general_notes=list(data.get("general_notes", DEFAULT_GENERAL_NOTES)),
             design_constants=dict(data.get("design_constants", DEFAULT_DESIGN_CONSTANTS)),
             cover_template=data.get("cover_template", ""),
+            branding=dict(data.get("branding") or {}),
         )
 
 

@@ -18,7 +18,8 @@ from ...services.converters import (
     revisions_of,
     type_from_row,
 )
-from ...services.grid import build_grid, editable_payload
+from ...services.columns import columns_for
+from ...services.grid import build_grid, editable_payload, override_payload
 from ..deps import current_org, get_db, get_schedule, schedule_view
 from ...core.references import fill_series
 from ..schemas import (
@@ -33,7 +34,9 @@ def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
     project = building.project
     house = svc.house_standard_for(session, org.id)
     scheme = svc.naming_scheme_for(session, org.id)
-    stype = type_from_row(schedule.schedule_type)
+    # The project's extra columns are part of this schedule's shape, and the
+    # editor sees every column the practice has not hidden from it.
+    stype = columns_for(schedule, target="editor")
     constants = constant_aliases(design_constants_for(project, house))
 
     grid = build_grid(session, schedule, stype, org.id, constants)
@@ -49,6 +52,7 @@ def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
                 values=dict(stored.values or {}),
                 computed=computed,
                 problems=problems,
+                overrides=dict(stored.overrides or {}),
             )
         )
 
@@ -81,7 +85,7 @@ def add_row(
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
 ) -> GridOut:
-    stype = type_from_row(schedule.schedule_type)
+    stype = columns_for(schedule)
     position = (
         payload.position
         if payload.position is not None
@@ -92,6 +96,7 @@ def add_row(
             schedule_id=schedule.id,
             position=position,
             values=editable_payload(payload.values, stype),
+            overrides=override_payload(payload.overrides or {}, stype),
         )
     )
     session.flush()
@@ -111,11 +116,14 @@ def update_row(
     if row is None or row.schedule_id != schedule.id:
         raise HTTPException(status_code=404, detail="no such row")
 
-    stype = type_from_row(schedule.schedule_type)
-    # Only input columns are accepted. Library and derived values are computed,
-    # so taking them from the client would store a stale value and render it as
-    # fact on the export.
+    stype = columns_for(schedule)
+    # Only input columns are accepted here. Library and derived values are
+    # computed, so taking them from the client would store a stale value and
+    # render it as fact on the export. A deliberate divergence goes in
+    # 'overrides', which is unambiguous.
     row.values = editable_payload(payload.values, stype)
+    if payload.overrides is not None:
+        row.overrides = override_payload(payload.overrides, stype)
     if payload.position is not None:
         row.position = payload.position
     session.flush()
@@ -167,6 +175,7 @@ def duplicate_row(
         schedule_id=schedule.id,
         position=source.position + 1,
         values=dict(source.values or {}),
+        overrides=dict(source.overrides or {}),
     )
     index = ordered.index(source) + 1
     ordered.insert(index, copy)
@@ -189,12 +198,13 @@ def paste_rows(
     'replace' is the only destructive mode and the caller has to ask for it by
     name, so a paste can no longer wipe a schedule somebody has filled in.
     """
-    stype = type_from_row(schedule.schedule_type)
+    stype = columns_for(schedule)
     incoming = [
         ScheduleRow(
             schedule_id=schedule.id,
             position=0,
             values=editable_payload(item.values, stype),
+            overrides=override_payload(item.overrides or {}, stype),
         )
         for item in payload.rows
     ]
@@ -242,7 +252,7 @@ def fill_down(
     The increment rule lives in core.references so the grid, an importer and a
     bulk-add all produce the same thing.
     """
-    stype = type_from_row(schedule.schedule_type)
+    stype = columns_for(schedule)
     column = stype.column(payload.column)
     key = column.legacy_name if column is not None else payload.column
     editable = {c.legacy_name for c in stype.inputs} | {"Model Reference"}
