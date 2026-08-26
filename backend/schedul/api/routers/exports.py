@@ -318,6 +318,101 @@ def register(
     return rows
 
 
+ROOM_HINTS = ("room number", "room", "space", "room served", "location", "area served")
+
+
+@router.get("/projects/{project_id}/rooms")
+def room_summary(
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Equipment grouped by the room or space it serves.
+
+    Answers "what is in RM8.64", which is the question the schedules already
+    hold the answer to but cannot be asked of them one file at a time. Which
+    column names a room varies by type, so the first input column whose name
+    looks like one is used, and which column was chosen is reported rather than
+    hidden -- a wrong guess should be visible.
+    """
+    from ...services.columns import columns_for
+
+    rooms: dict[str, list[dict[str, object]]] = {}
+    used_columns: dict[str, str] = {}
+    unassigned = 0
+
+    for building in svc.buildings_of(session, project):
+        for schedule in svc.live_schedules(session, building):
+            stype = columns_for(schedule)
+            room_column = _room_column(stype)
+            if room_column is None:
+                continue
+            used_columns[schedule.code] = room_column.name
+
+            reference = stype.inputs[0].legacy_name if stype.inputs else None
+            for row in schedule.rows:
+                values = row.values or {}
+                room = str(values.get(room_column.legacy_name, "") or "").strip()
+                if not room:
+                    if any(v not in (None, "") for v in values.values()):
+                        unassigned += 1
+                    continue
+                rooms.setdefault(room, []).append(
+                    {
+                        "building": building.label,
+                        "schedule_id": schedule.id,
+                        "code": schedule.code,
+                        "title": schedule.schedule_type.title if schedule.schedule_type else "",
+                        "reference": values.get(reference) if reference else None,
+                        "model_reference": values.get("Model Reference") or "",
+                    }
+                )
+
+    return {
+        "project": project.name or project.number,
+        "room_columns": used_columns,
+        "unassigned": unassigned,
+        "rooms": [
+            {
+                "room": room,
+                "count": len(items),
+                "by_type": _counted(items),
+                "items": sorted(items, key=lambda i: (i["code"], str(i["reference"] or ""))),
+            }
+            for room, items in sorted(rooms.items(), key=lambda kv: _natural(kv[0]))
+        ],
+    }
+
+
+def _room_column(stype):
+    """The input column that names a room, or None if this type has no such thing."""
+    for hint in ROOM_HINTS:
+        for column in stype.inputs:
+            if column.name.strip().lower() == hint:
+                return column
+    for column in stype.inputs:
+        if "room" in column.name.lower() or "space" in column.name.lower():
+            return column
+    return None
+
+
+def _counted(items: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[str(item["code"])] = counts.get(str(item["code"]), 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _natural(text: str) -> tuple:
+    """Sort 'RM2' before 'RM10', which plain string ordering gets backwards."""
+    import re
+
+    return tuple(
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", text)
+    )
+
+
 @router.get("/export/pdf-available")
 def pdf_available() -> dict[str, object]:
     return {"available": pdf_export.available(), "soffice": pdf_export.soffice_path()}

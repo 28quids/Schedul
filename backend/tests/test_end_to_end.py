@@ -580,3 +580,50 @@ class TestColumnModelEndToEnd:
         computed = grid["rows"][0]["computed"]
         assert excel["Manufacturer"] == computed["Manufacturer"] == "Vent-Axia"
         assert float(excel["Total Airflow"]) == float(computed["Total Airflow (l/s)"]) == 1000
+
+
+class TestRegisterAndRooms:
+    @pytest.fixture()
+    def populated(self, client, project) -> str:
+        building = project["buildings"][0]["id"]
+        result = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "RAD"},
+        ).json()
+        sid = result["buildings"][0]["schedules"][0]["id"]
+        for ref, room in [("RAD-001", "RM8.64"), ("RAD-002", "RM8.64"), ("RAD-003", "RM2")]:
+            client.post(f"/api/schedules/{sid}/rows", json={"values": {
+                "Radiator Reference": ref, "Room Served": room,
+            }})
+        return project["id"]
+
+    def test_rooms_group_equipment(self, client, populated):
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        rooms = {r["room"]: r for r in data["rooms"]}
+        assert rooms["RM8.64"]["count"] == 2
+        assert rooms["RM8.64"]["by_type"] == {"RAD": 2}
+        assert rooms["RM2"]["count"] == 1
+
+    def test_rooms_sort_naturally(self, client, populated):
+        """RM2 before RM8.64, which plain string ordering gets backwards."""
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        assert [r["room"] for r in data["rooms"]] == ["RM2", "RM8.64"]
+
+    def test_which_column_was_used_is_reported(self, client, populated):
+        """A wrong guess about which column names a room should be visible."""
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        assert data["room_columns"]["RAD"] == "Room Served"
+
+    def test_rows_with_no_room_are_counted_not_hidden(self, client, populated):
+        schedule = client.get("/api/register").json()[0]["schedule_id"]
+        client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Radiator Reference": "RAD-099"},
+        })
+        data = client.get(f"/api/projects/{populated}/rooms").json()
+        assert data["unassigned"] == 1
+
+    def test_the_register_carries_what_search_needs(self, client, populated):
+        row = client.get("/api/register").json()[0]
+        for key in ("project_name", "project_number", "building", "code",
+                    "document_number", "file_name", "status", "revision"):
+            assert key in row
