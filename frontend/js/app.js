@@ -11,6 +11,7 @@ import { catalogueView } from './views/catalogue.js';
 import { designerView } from './views/designer.js';
 import { libraryView } from './views/library.js';
 import { settingsView } from './views/settings.js';
+import { changesView } from './views/changes.js';
 
 export const store = {
   projects: [],
@@ -25,6 +26,7 @@ const routes = [
   { pattern: /^\/projects\/([^/]+)$/, view: projectView, nav: 'projects' },
   { pattern: /^\/schedules\/([^/]+)$/, view: scheduleView, nav: 'projects' },
   { pattern: /^\/register$/, view: registerView, nav: 'register' },
+  { pattern: /^\/changes$/, view: changesView, nav: 'changes' },
   { pattern: /^\/catalogue$/, view: catalogueView, nav: 'catalogue' },
   { pattern: /^\/catalogue\/new$/, view: designerView, nav: 'catalogue' },
   { pattern: /^\/catalogue\/([^/]+)$/, view: designerView, nav: 'catalogue' },
@@ -98,6 +100,7 @@ function renderNav(section) {
   nav.appendChild(el('div', { class: 'nav-group' }, [
     el('div', { class: 'nav-label', text: 'Setup' }),
     navItem('/settings', 'House standard'),
+    navItem('/changes', 'Changes'),
   ]));
 
   if (store.projects.length) {

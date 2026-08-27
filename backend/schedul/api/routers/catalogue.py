@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...core.catalogue import Column, ScheduleType, validate_type
+from ...core.catalogue import Column, ScheduleType, compare_columns, validate_type
 from ...core.formula import ALLOWED_FUNCTIONS, BANNED_FUNCTIONS, CONSTANTS
 from ...db.models import Organisation, Schedule, ScheduleTypeRow
+from ...services import impact as impact_svc
 from ...services import projects as svc
 from ...services.converters import type_from_row, type_to_row_fields
 from ..deps import current_org, get_db, not_found
@@ -169,6 +170,38 @@ def validate_draft(
     }
 
 
+@router.post("/{type_id}/impact")
+def preview_impact(
+    type_id: str,
+    payload: TypeIn,
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """What saving this draft would do to the schedules already using the type.
+
+    A dry run, so the designer can say it before the save rather than the author
+    finding out from an engineer. Presentational changes -- widths, order,
+    visibility -- reach every schedule of this type and are meant to; structural
+    ones can orphan values already typed, and those are what the warnings are
+    about.
+    """
+    row = _row(session, org, type_id)
+    before = [Column.from_dict(c) for c in (row.columns or [])]
+    after = [Column(**c.model_dump()) for c in payload.columns]
+    diff = compare_columns(before, after)
+    affected = impact_svc.affected_schedules(session, org.id, row.id)
+
+    return {
+        "code": row.code,
+        "version": row.version,
+        "diff": diff.to_dict(),
+        "affected": affected,
+        "affected_count": len(affected),
+        "rows_at_risk": sum(s["rows"] for s in affected) if diff.structural else 0,
+        "will_bump_version": not diff.empty,
+    }
+
+
 @router.post("", response_model=TypeOut, status_code=201)
 def create_type(
     payload: TypeIn,
@@ -238,13 +271,23 @@ def update_type(
     if errors:
         raise HTTPException(status_code=400, detail=errors)
 
+    before = [Column.from_dict(c) for c in (row.columns or [])]
+    diff = compare_columns(before, draft.columns)
     columns_changed = [c.to_dict() for c in draft.columns] != (row.columns or [])
     if columns_changed:
-        draft.bump(payload.change or "columns edited")
+        draft.bump(payload.change or diff.summary())
 
     for key, value in type_to_row_fields(draft).items():
         setattr(row, key, value)
     session.flush()
+
+    # Widths and order reach every schedule of this type immediately, because a
+    # schedule reads its type's current columns. That is the intended behaviour
+    # and it is also why the change is worth recording: somebody will find their
+    # schedule different and deserve to be able to see why.
+    impact_svc.record_type_change(
+        session, org.id, row, diff, note=payload.change or ""
+    )
     return _detail(session, org, row)
 
 

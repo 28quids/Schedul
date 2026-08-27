@@ -37,9 +37,11 @@ __all__ = [
     "ScheduleType",
     "CatalogueError",
     "ValidationIssue",
+    "ColumnDiff",
     "MODEL_REFERENCE",
     "validate_type",
     "validate_catalogue",
+    "compare_columns",
     "from_legacy",
     "to_legacy",
 ]
@@ -536,3 +538,163 @@ def to_legacy(st: ScheduleType) -> dict[str, Any]:
             [c.legacy_name, c.width, c.formula or "", c.note or ""] for c in st.derived
         ],
     }
+
+
+# ------------------------------------------------------- change analysis ---
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnDiff:
+    """What changed between two versions of a type's columns.
+
+    The distinction that matters is structural against presentational. Widening
+    a column or moving one along changes how every schedule of that type looks,
+    and should: that is the designer doing its job, and it propagates. Adding,
+    removing or renaming one changes what a schedule *means*, and rows already
+    typed are keyed by column name -- so a rename orphans data and has to be
+    said out loud rather than discovered later by an engineer looking for a duty
+    that is no longer there.
+    """
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    renamed: tuple[tuple[str, str], ...] = ()
+    kind_changed: tuple[str, ...] = ()
+    formula_changed: tuple[str, ...] = ()
+    resized: tuple[str, ...] = ()
+    visibility_changed: tuple[str, ...] = ()
+    reordered: bool = False
+
+    @property
+    def structural(self) -> bool:
+        """Whether this changes what a schedule holds, not just how it looks."""
+        return bool(self.added or self.removed or self.renamed or self.kind_changed)
+
+    @property
+    def presentational(self) -> bool:
+        return bool(self.resized or self.visibility_changed or self.reordered)
+
+    @property
+    def empty(self) -> bool:
+        return not (self.structural or self.presentational or self.formula_changed)
+
+    @property
+    def severity(self) -> str:
+        return "warn" if self.structural else "info"
+
+    def summary(self) -> str:
+        """One line, in the order somebody would want to hear it."""
+        parts: list[str] = []
+        if self.added:
+            parts.append(f"added {', '.join(self.added)}")
+        if self.removed:
+            parts.append(f"removed {', '.join(self.removed)}")
+        if self.renamed:
+            parts.append(
+                "renamed " + ", ".join(f"{a} to {b}" for a, b in self.renamed)
+            )
+        if self.kind_changed:
+            parts.append(f"changed the kind of {', '.join(self.kind_changed)}")
+        if self.formula_changed:
+            parts.append(f"changed the formula for {', '.join(self.formula_changed)}")
+        if self.reordered:
+            parts.append("reordered the columns")
+        if self.resized:
+            parts.append(f"resized {', '.join(self.resized)}")
+        if self.visibility_changed:
+            parts.append(f"changed where {', '.join(self.visibility_changed)} appears")
+        return "; ".join(parts) or "no change"
+
+    def warnings(self) -> list[str]:
+        """What a person needs told before saving, in their own terms."""
+        out: list[str] = []
+        for old, new in self.renamed:
+            out.append(
+                f"{old!r} becomes {new!r}. Values already typed are stored under the "
+                f"old name, so those cells will read as empty until they are re-entered."
+            )
+        for name in self.removed:
+            out.append(
+                f"{name!r} disappears from every schedule of this type. Anything "
+                f"typed into it is kept in the record but stops being shown or exported."
+            )
+        for name in self.kind_changed:
+            out.append(
+                f"{name!r} changes kind, so where its value comes from changes: "
+                f"typed values and library lookups are not interchangeable."
+            )
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "added": list(self.added),
+            "removed": list(self.removed),
+            "renamed": [list(pair) for pair in self.renamed],
+            "kind_changed": list(self.kind_changed),
+            "formula_changed": list(self.formula_changed),
+            "resized": list(self.resized),
+            "visibility_changed": list(self.visibility_changed),
+            "reordered": self.reordered,
+            "structural": self.structural,
+            "presentational": self.presentational,
+            "severity": self.severity,
+            "summary": self.summary(),
+            "warnings": self.warnings(),
+        }
+
+
+def compare_columns(
+    before: Sequence[Column], after: Sequence[Column]
+) -> ColumnDiff:
+    """What changed between two column lists, by name.
+
+    A column that vanishes while another appears in the same slot, of the same
+    kind, is read as a rename rather than as a removal and an addition. That is
+    a guess, but it is the guess that produces the warning worth reading: an
+    addition alone would say nothing about the values left behind.
+    """
+    old = {c.legacy_name: c for c in before}
+    new = {c.legacy_name: c for c in after}
+
+    added = [n for n in new if n not in old]
+    removed = [n for n in old if n not in new]
+
+    renamed: list[tuple[str, str]] = []
+    if len(added) == 1 and len(removed) == 1:
+        was, now = removed[0], added[0]
+        if old[was].kind == new[now].kind:
+            positions = (
+                [c.legacy_name for c in before].index(was),
+                [c.legacy_name for c in after].index(now),
+            )
+            if positions[0] == positions[1]:
+                renamed = [(was, now)]
+                added, removed = [], []
+
+    shared = [n for n in new if n in old]
+    kind_changed = [n for n in shared if old[n].kind != new[n].kind]
+    formula_changed = [
+        n for n in shared
+        if (old[n].formula or "") != (new[n].formula or "")
+    ]
+    resized = [n for n in shared if old[n].width != new[n].width]
+    visibility_changed = [
+        n for n in shared if dict(old[n].visibility) != dict(new[n].visibility)
+    ]
+
+    order_before = [n for n in (c.legacy_name for c in before) if n in new or n in dict(renamed)]
+    order_after = [n for n in (c.legacy_name for c in after) if n in old or n in dict((b, a) for a, b in renamed)]
+    reordered = [n for n in order_before if n in order_after] != [
+        n for n in order_after if n in order_before
+    ]
+
+    return ColumnDiff(
+        added=tuple(added),
+        removed=tuple(removed),
+        renamed=tuple(renamed),
+        kind_changed=tuple(kind_changed),
+        formula_changed=tuple(formula_changed),
+        resized=tuple(resized),
+        visibility_changed=tuple(visibility_changed),
+        reordered=reordered,
+    )

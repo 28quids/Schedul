@@ -128,6 +128,7 @@ class ScheduleContent:
         doc_type: str = "SC",
         classification: str = "",
         theme: str = "xlsx",
+        notes: Sequence[str] | None = None,
     ) -> None:
         self.schedule_type = schedule_type
         self.house = house
@@ -152,6 +153,10 @@ class ScheduleContent:
         self.products = list(products)
         self.doc_type = doc_type
         self.classification = classification
+        #: The resolved notes, already layered by core.notes. None falls back to
+        #: the organisation's plus the type's, which is what they resolve to for
+        #: a schedule that has not diverged.
+        self.notes = list(notes) if notes is not None else None
 
     @property
     def issue_theme(self) -> bool:
@@ -181,8 +186,16 @@ def _notes_block(content: ScheduleContent) -> str:
     SPEC.md 4.7 and 1a.1: the real house file's A2 is equipment-specific
     ("radiant panels are to be sized with a 55degC flow"), while v1 put the same
     project-level block on every schedule. Both belong, in that order.
+
+    Which notes those are is resolved by ``core.notes`` before it gets here --
+    organisation, then project, then type, unless the schedule has taken them
+    over -- so the workbook prints exactly what the editor showed.
     """
-    combined = [*content.house.general_notes, *content.schedule_type.notes]
+    combined = (
+        content.notes
+        if content.notes is not None
+        else [*content.house.general_notes, *content.schedule_type.notes]
+    )
     if not combined:
         return ""
     numbered = "\n".join(f"[{i}] {n}" for i, n in enumerate(combined, start=1))

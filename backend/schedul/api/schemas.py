@@ -13,6 +13,7 @@ __all__ = [
     "ScheduleIn", "ScheduleOut",
     "RowIn", "RowOut", "GridOut", "GridColumn",
     "PasteIn", "PastePreviewIn", "CellEdit", "CellsIn", "DeleteRowsIn", "FillIn",
+    "ScheduleNotesIn",
     "RevisionIn", "RevisionOut",
     "EquipmentIn", "EquipmentOut",
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
@@ -83,6 +84,9 @@ class ProjectIn(BaseModel):
     approved_by: str = ""
     naming_overrides: dict[str, Any] = Field(default_factory=dict)
     design_constants: dict[str, Any] = Field(default_factory=dict)
+    #: Notes this job adds under the organisation's. None leaves them as they
+    #: are, so a form that does not carry them cannot blank them by omission.
+    notes: list[str] | None = None
 
 
 class ScheduleOut(BaseModel):
@@ -141,6 +145,9 @@ class ProjectOut(ProjectSummary):
     naming_overrides: dict[str, Any] = Field(default_factory=dict)
     design_constants: dict[str, Any] = Field(default_factory=dict)
     effective_constants: dict[str, float] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+    #: The organisation's notes, shown above the project's in the editor.
+    organisation_notes: list[str] = Field(default_factory=list)
     buildings: list[BuildingOut] = Field(default_factory=list)
     naming_preview: dict[str, Any] = Field(default_factory=dict)
 
@@ -201,6 +208,12 @@ class GridOut(BaseModel):
     history: dict[str, Any] = Field(default_factory=dict)
     #: Set when the type has moved on since this schedule was built.
     type_drift: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScheduleNotesIn(BaseModel):
+    """This schedule's own notes, or None to go back to inheriting them."""
+
+    notes: list[str] | None = None
 
 
 class RowIn(BaseModel):

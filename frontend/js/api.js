@@ -110,6 +110,9 @@ export const api = {
     pastePreview: (id, body) =>
       request('POST', `/api/schedules/${id}/rows/paste/preview`, body),
     fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
+    notes: (id) => request('GET', `/api/schedules/${id}/notes`),
+    setNotes: (id, notes) => request('PUT', `/api/schedules/${id}/notes`, { notes }),
+    customiseNotes: (id) => request('POST', `/api/schedules/${id}/notes/customise`),
     undo: (id) => request('POST', `/api/schedules/${id}/undo`),
     redo: (id) => request('POST', `/api/schedules/${id}/redo`),
 
@@ -135,6 +138,7 @@ export const api = {
     update: (id, body) => request('PUT', `/api/catalogue/${id}`, body),
     validate: (body) => request('POST', '/api/catalogue/validate', body),
     usage: (id) => request('GET', `/api/catalogue/${id}/usage`),
+    impact: (id, body) => request('POST', `/api/catalogue/${id}/impact`, body),
     archive: (id) => request('DELETE', `/api/catalogue/${id}`),
   },
 
@@ -149,6 +153,8 @@ export const api = {
     resolveFlag: (id) => request('POST', `/api/library/review/flags/${id}/resolve`),
     remove: (id) => request('DELETE', `/api/library/${id}`),
   },
+
+  impact: (area = '') => request('GET', `/api/impact${area ? `?area=${area}` : ''}`),
 
   register: (projectId) =>
     request('GET', `/api/register${projectId ? `?project_id=${projectId}` : ''}`),

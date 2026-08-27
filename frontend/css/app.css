@@ -454,12 +454,89 @@ td.cell-library:hover .cell-override { visibility: visible; }
 .cell-reset { color: var(--blue-dark); font-weight: 400; }
 td.cell-library { position: relative; }
 
-/* Drag the right edge of a preview column to set its width.
-   Scoped to the preview: a blanket `th { position: relative }` would override
-   the sticky positioning that keeps table headers in view everywhere else. */
-#designer-preview table.sheet thead th { position: relative; }
-#designer-preview .col-resize {
+/* --------------------------------------------------- the type designer --- */
+
+/* The designer's table is the editor: names are typed in the header, widths are
+   dragged on the edge, columns are dragged to move. Scoped to this table — a
+   blanket `th { position: relative }` would override the sticky positioning
+   that keeps table headers in view everywhere else. */
+/* Not sticky here. The designer's table is short and the page scrolls behind
+   it, so a stuck header would ride down over the example row. */
+table.designer-sheet thead th {
+  position: relative; vertical-align: top; padding: 6px 7px; top: auto;
+}
+table.designer-sheet thead th.auto-column { opacity: .75; }
+.col-head { display: flex; align-items: center; gap: 3px; }
+.col-grip { cursor: grab; color: var(--grey-400); font-size: 11px; user-select: none; }
+.col-grip:active { cursor: grabbing; }
+input.col-name {
+  border: 1px solid transparent; background: transparent; font: inherit; font-weight: 600;
+  color: var(--grey-800); padding: 2px 3px; width: 100%; min-width: 0; border-radius: 3px;
+}
+input.col-name:hover { border-color: var(--grey-300); background: var(--white); }
+input.col-name:focus { border-color: var(--blue); background: var(--white); outline: none; }
+.col-name-fixed { font-weight: 600; color: var(--grey-600); font-style: italic; }
+select.col-kind {
+  font-size: 10.5px; padding: 1px 4px; height: auto; margin-top: 3px;
+  border-color: var(--grey-300); background: var(--white); width: 100%;
+}
+.col-more { opacity: 0; font-size: 12px; }
+table.designer-sheet th:hover .col-more { opacity: 1; }
+th.col-selected { box-shadow: inset 0 0 0 2px var(--blue); }
+
+.col-resize {
   position: absolute; top: 0; right: -3px; width: 9px; height: 100%;
   cursor: col-resize; background: transparent; z-index: 5;
 }
-#designer-preview .col-resize:hover { background: var(--blue); opacity: .5; }
+.col-resize:hover { background: var(--blue); opacity: .5; }
+
+.col-insert {
+  position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; line-height: 14px; text-align: center; padding: 0;
+  border: 1px solid var(--grey-300); border-radius: 50%; background: var(--white);
+  color: var(--blue-dark); cursor: pointer; font-size: 11px; opacity: 0; z-index: 6;
+}
+table.designer-sheet th:hover .col-insert { opacity: 1; }
+.col-insert:hover { background: var(--blue-wash); border-color: var(--blue); }
+
+table.designer-sheet th.dragging { opacity: .45; }
+table.designer-sheet th.drop-before { box-shadow: inset 3px 0 0 var(--blue); }
+table.designer-sheet th.drop-after { box-shadow: inset -3px 0 0 var(--blue); }
+
+/* ---------------------------------------------------------------- drawer --- */
+
+/* Advanced settings for one column. A drawer rather than more table: these are
+   settings on a column, and putting them in the grid made the old screen a
+   spreadsheet of a spreadsheet. */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 330px; z-index: 250;
+  background: var(--white); border-left: 1px solid var(--grey-300);
+  box-shadow: -6px 0 24px rgba(0, 0, 0, .08); display: flex; flex-direction: column;
+}
+.drawer-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--grey-200);
+}
+.drawer-body { padding: 14px; overflow: auto; }
+.drawer-body .field { margin-bottom: 12px; }
+.checks { display: flex; flex-direction: column; gap: 4px; }
+label.check { display: flex; gap: 6px; align-items: center; }
+.inherited-notes { margin-bottom: 8px; }
+tr.detail-row > td { background: var(--grey-50); padding: 8px 12px; }
+
+/* ----------------------------------------------------------------- notes --- */
+
+.note-list { padding-left: 20px; font-size: 12.5px; line-height: 1.7; margin: 0; }
+.note-list li { margin-bottom: 4px; }
+.note-list .note-text { margin-right: 8px; }
+.note-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.note-row textarea { flex: 1; }
+.note-row .muted { padding-top: 7px; }
+
+.layer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.layer-panel {
+  border: 1px solid var(--grey-200); border-radius: var(--radius); padding: 10px 12px;
+  background: var(--grey-50);
+}
+.layer-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.layer-panel .note-list { padding-left: 16px; margin-top: 6px; }

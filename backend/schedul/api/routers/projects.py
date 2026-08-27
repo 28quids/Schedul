@@ -98,7 +98,9 @@ def create_project(
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
 ) -> ProjectOut:
-    project = Project(organisation_id=org.id, **payload.model_dump())
+    fields = payload.model_dump()
+    fields["notes"] = fields.get("notes") or []
+    project = Project(organisation_id=org.id, **fields)
     session.add(project)
     session.flush()
     # Every project has at least one building in the data model; the UI hides
@@ -124,6 +126,10 @@ def update_project(
     org: Organisation = Depends(current_org),
 ) -> ProjectOut:
     for key, value in payload.model_dump().items():
+        # Omitting the notes leaves them alone. A setup form that does not carry
+        # them must not blank them just by being saved.
+        if key == "notes" and value is None:
+            continue
         setattr(project, key, value)
     session.flush()
     return project_view(session, project, org)

@@ -211,8 +211,33 @@ function drawGrid(root) {
     'Ctrl+D fills it down, Ctrl+Z undoes.',
   ]));
 
+  renderTypeDrift(root);
   renderProblemSummary(root);
   paintSelection();
+}
+
+/**
+ * Say when the schedule type has moved on since this schedule was set up.
+ *
+ * The columns here are always the type's current ones — that is what makes a
+ * change in the designer take effect — so this is not a warning that anything
+ * is broken. It is where a new column or a different width came from, on the
+ * screen where somebody would notice it.
+ */
+function renderTypeDrift(root) {
+  const drift = view.grid.type_drift;
+  if (!drift || !drift.current) return;
+
+  const changes = (drift.changes || []).filter((c) => c.change);
+  root.appendChild(el('div', { style: 'margin-top:12px' }, [
+    notice(
+      `This schedule was set up against ${view.grid.schedule.code} v${drift.built_against}; ` +
+      `the type is now at v${drift.current}. Its columns follow the type, so what you see ` +
+      'here is current.',
+      'info',
+      changes.map((c) => `v${c.version}${c.date ? ` (${c.date})` : ''}: ${c.change}`)
+    ),
+  ]));
 }
 
 function gridToolbar() {
@@ -1740,17 +1765,203 @@ async function addRevision(statuses, published) {
 
 /* ---------------------------------------------------------------- notes --- */
 
-function drawNotes(root) {
-  root.appendChild(card(
-    'General notes',
+/**
+ * The notes that print here, and where each one comes from.
+ *
+ * Four layers, general to specific: the practice's standing wording, what this
+ * job adds, what this equipment type says, and — only when it has to — what
+ * this one document says instead. The merged result is shown in printing order
+ * with each line labelled, because "why does this schedule say that" is the
+ * question, and an unlabelled list cannot answer it.
+ */
+async function drawNotes(root) {
+  const box = el('div', { class: 'muted', text: 'Loading…' });
+  root.appendChild(box);
+
+  let notes;
+  try {
+    notes = await api.schedules.notes(view.id);
+  } catch (error) { clear(box).appendChild(notice(error.message, 'error')); return; }
+  clear(box);
+
+  view.grid.notes = notes.notes;
+  view.grid.notes_customised = notes.notes_customised;
+
+  const SOURCES = {
+    organisation: ['house standard', 'quiet'],
+    project: ['this project', 'blue'],
+    type: ['this equipment type', 'green'],
+    schedule: ['this schedule', 'amber'],
+  };
+
+  const merged = el('ol', { class: 'note-list' }, notes.note_layers.map((n) => {
+    const [label, tone] = SOURCES[n.source] || [n.source, 'quiet'];
+    return el('li', {}, [
+      el('span', { class: 'note-text', text: n.text }),
+      pill(label, tone),
+    ]);
+  }));
+
+  box.appendChild(card(
+    'What prints on this schedule',
     el('div', {}, [
       el('p', { class: 'muted' }, [
-        'These print in the notes block at the top of the schedule: the practice-wide ' +
-        'wording first, then anything specific to this equipment type.',
+        notes.notes_customised
+          ? 'This schedule has taken its notes over, so only its own print. The layers it ' +
+            'would go back to are below.'
+          : 'In printing order: the practice-wide wording first, then anything this project ' +
+            'adds, then wording specific to this equipment type.',
       ]),
-      el('ol', { style: 'padding-left:20px;font-size:12.5px;line-height:1.7' },
-        view.grid.notes.map((n) => el('li', { text: n }))),
+      notes.note_layers.length
+        ? merged
+        : empty('No notes', 'Nothing will print in the notes block.'),
     ]),
-    [button('Edit type notes', { on: { click: () => go('/catalogue') } })]
+    notes.notes_customised
+      ? [
+          button('Revert to the project defaults', {
+            class: 'btn btn-danger',
+            on: { click: () => revertNotes() },
+          }),
+        ]
+      : [
+          button('Give this schedule its own notes', {
+            title: 'Starts from what it says now, so one line can be changed',
+            on: { click: () => customiseNotes() },
+          }),
+        ]
   ));
+
+  if (notes.notes_customised) {
+    box.appendChild(scheduleNotesEditor(notes));
+    box.appendChild(card(
+      'What it would go back to',
+      el('ol', { class: 'note-list muted' },
+        notes.inherited.map((n) => el('li', {}, [
+          el('span', { class: 'note-text', text: n.text }),
+          pill((SOURCES[n.source] || [n.source])[0], 'quiet'),
+        ]))),
+      [],
+      'Reverting drops this schedule\u2019s own notes and follows these again.'
+    ));
+    return;
+  }
+
+  box.appendChild(card(
+    'Where they come from',
+    el('div', { class: 'layer-grid' }, [
+      layerPanel(
+        'House standard',
+        notes.layers.organisation,
+        'Every schedule in the practice.',
+        button('Edit', { class: 'btn btn-sm', on: { click: () => go('/settings') } })
+      ),
+      layerPanel(
+        'This project',
+        notes.layers.project,
+        'Every schedule on this job.',
+        button('Edit', {
+          class: 'btn btn-sm',
+          on: { click: () => go(`/projects/${view.grid.project_id}`) },
+        })
+      ),
+      layerPanel(
+        'This equipment type',
+        notes.layers.type,
+        `Every ${view.grid.schedule.code} schedule anywhere.`,
+        button('Edit', { class: 'btn btn-sm', on: { click: () => go('/catalogue') } })
+      ),
+    ])
+  ));
+}
+
+function layerPanel(title, items, hint, action) {
+  return el('div', { class: 'layer-panel' }, [
+    el('div', { class: 'layer-head' }, [
+      el('strong', { text: title }),
+      action || null,
+    ]),
+    el('div', { class: 'muted tiny', text: hint }),
+    items && items.length
+      ? el('ul', { class: 'note-list tiny' }, items.map((n) => el('li', { text: n })))
+      : el('div', { class: 'muted tiny', style: 'margin-top:6px', text: 'None.' }),
+  ]);
+}
+
+/** Editing this schedule's own notes, once it has diverged. */
+function scheduleNotesEditor(notes) {
+  let draft = [...notes.notes];
+  const list = el('div');
+
+  const render = () => {
+    clear(list);
+    draft.forEach((note, index) => {
+      list.appendChild(el('div', { class: 'note-row' }, [
+        el('span', { class: 'muted tiny', text: `[${index + 1}]` }),
+        el('textarea', {
+          rows: 2, value: note,
+          on: { input: (e) => { draft[index] = e.target.value; } },
+        }),
+        el('button', {
+          class: 'icon-btn', title: 'Remove this note',
+          on: { click: () => { draft.splice(index, 1); render(); } },
+        }, ['×']),
+      ]));
+    });
+    if (!draft.length) {
+      list.appendChild(el('p', { class: 'muted tiny' }, [
+        'No notes. This schedule will print none at all, which is different from ' +
+        'inheriting — use Revert to follow the project again.',
+      ]));
+    }
+  };
+  render();
+
+  return card(
+    'This schedule\u2019s notes',
+    list,
+    [
+      button('+ Add note', {
+        class: 'btn btn-sm',
+        on: { click: () => { draft.push(''); render(); } },
+      }),
+      button('Save notes', {
+        class: 'btn btn-primary',
+        on: {
+          click: async () => {
+            try {
+              await api.schedules.setNotes(view.id, draft.filter((n) => n.trim()));
+              toast('Notes saved', 'ok');
+              draw();
+            } catch (error) { fail(error); }
+          },
+        },
+      }),
+    ],
+    'These replace the inherited notes on this document only.'
+  );
+}
+
+async function customiseNotes() {
+  try {
+    await api.schedules.customiseNotes(view.id);
+    toast('This schedule now has its own notes', 'ok');
+    draw();
+  } catch (error) { fail(error); }
+}
+
+async function revertNotes() {
+  const ok = await confirmDialog({
+    title: 'Revert to the project defaults?',
+    message:
+      'This schedule\u2019s own notes are discarded and it follows the house standard, the ' +
+      'project and the equipment type again.',
+    confirmLabel: 'Revert',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api.schedules.setNotes(view.id, null);
+    toast('Reverted to the inherited notes', 'ok');
+    draw();
+  } catch (error) { fail(error); }
 }

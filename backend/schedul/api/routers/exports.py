@@ -29,6 +29,7 @@ from ...services import projects as svc
 from ...services.columns import columns_for
 from ...services.converters import design_constants_for, revisions_of, type_from_row
 from ...services.grid import library_index
+from ...services import notes as notes_svc
 from ..deps import current_org, get_db, get_project, get_schedule, not_found
 from ..schemas import RegisterRow
 
@@ -55,7 +56,9 @@ def _content(
     product_rows = [{"Model Reference": ref, **values} for ref, values in products.items()]
 
     tokens = {**(project.naming_overrides or {})}
+    resolved = notes_svc.resolved_notes(schedule, stype, house, project)
     return ScheduleContent(
+        notes=[n.text for n in resolved],
         schedule_type=stype,
         house=house,
         project_fields=project.project_fields,

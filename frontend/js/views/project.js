@@ -550,6 +550,19 @@ async function bulkRevision() {
 
 /* ---------------------------------------------------------------- setup --- */
 
+/** The project's own fields, for a save that is only changing one other thing. */
+function projectFields(p) {
+  return {
+    number: p.number, name: p.name, client: p.client,
+    site_address: p.site_address, architect: p.architect,
+    main_contractor: p.main_contractor, riba_stage: p.riba_stage,
+    prepared_by: p.prepared_by, checked_by: p.checked_by,
+    approved_by: p.approved_by,
+    naming_overrides: p.naming_overrides,
+    design_constants: p.design_constants,
+  };
+}
+
 function drawSetup(root) {
   const p = state.project;
   const fields = {
@@ -622,11 +635,7 @@ function drawSetup(root) {
     }
     try {
       await api.projects.update(p.id, {
-        number: p.number, name: p.name, client: p.client,
-        site_address: p.site_address, architect: p.architect,
-        main_contractor: p.main_contractor, riba_stage: p.riba_stage,
-        prepared_by: p.prepared_by, checked_by: p.checked_by, approved_by: p.approved_by,
-        naming_overrides: p.naming_overrides,
+        ...projectFields(p),
         design_constants: overrides,
       });
       toast('Design constants saved', 'ok');
@@ -639,6 +648,47 @@ function drawSetup(root) {
     table(['Constant', 'Value', 'Source'], constantRows),
     [button('Save constants', { class: 'btn btn-primary', on: { click: saveConstants } })],
     'Derived columns calculate from these. Overriding one here affects this project only.'
+  ));
+
+  // The middle notes layer: under the practice's, above the equipment type's.
+  const notesArea = el('textarea', {
+    rows: 6,
+    value: (p.notes || []).join('\n'),
+    placeholder: 'One per line. Left blank, this job adds nothing of its own.',
+  });
+
+  root.appendChild(card(
+    'Project notes',
+    el('div', {}, [
+      el('p', { class: 'muted tiny' }, [
+        'These print on every schedule in this project, under the practice-wide notes and ' +
+        'above anything specific to the equipment type. A schedule can still take its own ' +
+        'notes over if it has to say something different.',
+      ]),
+      (p.organisation_notes || []).length
+        ? el('details', { class: 'inherited-notes' }, [
+            el('summary', { class: 'tiny muted', text: `${p.organisation_notes.length} house standard note(s) print above these` }),
+            el('ol', { class: 'note-list tiny muted' },
+              p.organisation_notes.map((n) => el('li', { text: n }))),
+          ])
+        : null,
+      notesArea,
+    ]),
+    [button('Save notes', {
+      class: 'btn btn-primary',
+      on: {
+        click: async () => {
+          try {
+            await api.projects.update(p.id, {
+              ...projectFields(p),
+              notes: notesArea.value.split('\n').map((l) => l.trim()).filter(Boolean),
+            });
+            toast('Project notes saved', 'ok');
+            await reload();
+          } catch (error) { fail(error); }
+        },
+      },
+    })]
   ));
 
   const preview = p.naming_preview || {};

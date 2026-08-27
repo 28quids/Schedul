@@ -227,6 +227,8 @@ def project_view(session: Session, project: Project, org: Organisation) -> Proje
         naming_overrides=dict(project.naming_overrides or {}),
         design_constants=dict(project.design_constants or {}),
         effective_constants=design_constants_for(project, house),
+        notes=list(project.notes or []),
+        organisation_notes=list(house.general_notes),
         building_count=len(buildings),
         schedule_count=sum(len(b.schedules) for b in buildings),
         updated_at=project.updated_at,

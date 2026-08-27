@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from ..core.revisions import sort_key
 from ..db.models import Organisation, RevisionRow, Schedule
 from .columns import columns_for
+from . import notes as _notes
 from .converters import constant_aliases, design_constants_for
 from .grid import build_grid
 
@@ -63,7 +64,10 @@ def take_snapshot(
         "building": building.label,
         "project_fields": project.project_fields,
         "design_constants": constants,
-        "notes": [*house.general_notes, *stype.notes],
+        # The notes as they resolved at the moment of issue, not the layers they
+        # came from: a note reworded in the house standard next month must not
+        # change what an issued document said.
+        "notes": [n.text for n in _notes.resolved_notes(schedule, stype, house, project)],
         "columns": [c.to_dict() for c in stype.columns],
         # The computed values are the point: they are what stops a later library
         # correction changing the meaning of a document already issued.

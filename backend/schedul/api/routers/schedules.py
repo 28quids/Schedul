@@ -21,13 +21,14 @@ from ...services.converters import (
 from ...services.columns import columns_for
 from ...services.issue import diff_snapshots, issue_revision
 from ...services import history as hist
+from ...services import notes as notes_svc
 from ...services.grid import build_grid, editable_payload, override_payload
 from ..deps import current_org, get_db, get_schedule, schedule_view
 from ...core.references import fill_series
 from ...core import tabular
 from ..schemas import (
     CellsIn, DeleteRowsIn, FillIn, GridColumn, GridOut, PasteIn, PastePreviewIn,
-    RevisionIn, RevisionOut, RowIn, RowOut,
+    RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
 )
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -69,9 +70,39 @@ def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
         building_id=building.id,
         building_ref=building.ref,
         building_count=len(svc.buildings_of(session, project)),
-        notes=[*house.general_notes, *stype.notes],
+        **{
+            k: v for k, v in notes_svc.notes_view(schedule, stype, house, project).items()
+            if k in ("notes", "note_layers", "notes_customised")
+        },
         history=hist.history_state(session, schedule.id),
+        type_drift=_type_drift(schedule),
     )
+
+
+def _type_drift(schedule: Schedule) -> dict[str, object]:
+    """Whether the catalogue type has moved on since this schedule was built.
+
+    The columns themselves are always the type's current ones -- that is what
+    makes a width or an order change in the designer show up here -- so this is
+    not a warning that the schedule is stale. It is the schedule saying which
+    version it was set up against, so somebody who finds a new column can see
+    where it came from.
+    """
+    type_row = schedule.schedule_type
+    if type_row is None or type_row.version <= schedule.type_version:
+        return {}
+    history = [
+        h for h in (type_row.history or [])
+        if int(h.get("version", 0)) >= schedule.type_version
+    ]
+    return {
+        "built_against": schedule.type_version,
+        "current": type_row.version,
+        "changes": [
+            {"version": h.get("version"), "date": h.get("date", ""), "change": h.get("change", "")}
+            for h in history[-6:]
+        ],
+    }
 
 
 @router.get("/{schedule_id}", response_model=GridOut)
@@ -502,6 +533,62 @@ def redo_edit(
     except hist.UndoError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _grid(session, schedule, org)
+
+
+# ----------------------------------------------------------------- notes ---
+
+
+def _notes_payload(session: Session, schedule: Schedule, org: Organisation) -> dict[str, object]:
+    house = svc.house_standard_for(session, org.id)
+    stype = columns_for(schedule)
+    return notes_svc.notes_view(schedule, stype, house)
+
+
+@router.get("/{schedule_id}/notes")
+def read_notes(
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """The notes that print here, each layer of them, and what they resolve to."""
+    return _notes_payload(session, schedule, org)
+
+
+@router.put("/{schedule_id}/notes")
+def write_notes(
+    payload: ScheduleNotesIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Give this schedule its own notes, or hand it back to the layers.
+
+    ``notes: null`` reverts. It is the only way back, and it is deliberately the
+    same shape as never having diverged, so there is no third state to reason
+    about.
+    """
+    notes_svc.set_schedule_notes(schedule, payload.notes)
+    session.flush()
+    return _notes_payload(session, schedule, org)
+
+
+@router.post("/{schedule_id}/notes/customise")
+def customise_notes(
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Take the notes over, starting from what they say now.
+
+    Diverging starts from the resolved wording rather than from nothing: the
+    point is almost always to change one line.
+    """
+    house = svc.house_standard_for(session, org.id)
+    stype = columns_for(schedule)
+    if schedule.notes is None:
+        schedule.notes = notes_svc.starting_point(schedule, stype, house)
+        session.flush()
+    return _notes_payload(session, schedule, org)
 
 
 # -------------------------------------------------------------- revisions ---
