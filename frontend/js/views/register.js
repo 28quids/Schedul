@@ -15,8 +15,14 @@ import {
 
 const state = { query: '', status: '', open: new Set(), mode: 'projects' };
 
-export async function registerView() {
-  const [rows, projects] = await Promise.all([api.register(), api.projects.list()]);
+export async function registerView(query = '') {
+  // '#/register?project=<id>' opens the register already narrowed to one job,
+  // which is what the sidebar links to from inside a project.
+  const params = new URLSearchParams(query || '');
+  const only = params.get('project') || '';
+  if (only) state.open.add(only);
+
+  const [rows, projects] = await Promise.all([api.register(only), api.projects.list()]);
   store.projects = projects;
 
   const search = input(state.query, {
@@ -92,11 +98,16 @@ export async function registerView() {
         el('h1', { text: 'Register' }),
         el('div', {
           class: 'sub',
-          text: `${rows.length} schedule(s) across ${projects.length} project(s). ` +
-                'Always current — nothing to refresh.',
+          text: only
+            ? `${rows.length} schedule(s) on this project. Always current — nothing to refresh.`
+            : `${rows.length} schedule(s) across ${projects.length} project(s). ` +
+              'Always current — nothing to refresh.',
         }),
       ]),
       el('div', { class: 'btn-row' }, [
+        only
+          ? button('Show every project', { on: { click: () => go('/register') } })
+          : null,
         modeSwitch,
         button('Copy as TSV', { on: { click: () => copyTsv(rows.filter(matches)) } }),
       ]),

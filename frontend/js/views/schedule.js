@@ -21,7 +21,7 @@
 // the DOM, because they are the parts that have to be exactly right.
 
 import { api } from '../api.js';
-import { go, store } from '../app.js';
+import { go, setContext, store } from '../app.js';
 import {
   anchoredList, button, card, clear, confirmDialog, debounce, download, el, empty,
   fail, field, formatDate, input, modal, mount, notice, pill, select, show, table,
@@ -66,9 +66,19 @@ export async function scheduleView(scheduleId) {
     api.schedules.revisions(scheduleId),
     api.catalogue.meta(),
   ]);
+  // The other schedules in this building, so the sidebar can move between them
+  // without a trip back to the project page.
+  let siblings = [];
+  try {
+    const project = await api.projects.read(grid.project_id);
+    const building = project.buildings.find((b) => b.id === grid.building_id);
+    siblings = (building ? building.schedules : []).map((s) => ({
+      id: s.id, code: s.code, title: s.title,
+    }));
+  } catch { /* the sidebar is a convenience, not a requirement */ }
   const sameSchedule = view && view.id === scheduleId;
   view = {
-    grid, revisions, meta, id: scheduleId,
+    grid, revisions, meta, siblings, id: scheduleId,
     tab: sameSchedule ? view.tab : 'schedule',
   };
   if (!sameSchedule) { sel = null; tabAnchor = null; draftOverrides.clear(); }
@@ -77,6 +87,14 @@ export async function scheduleView(scheduleId) {
 
 function draw() {
   const { schedule, project_id, project_name, building_ref, building_count } = view.grid;
+
+  setContext({
+    projectId: project_id,
+    projectName: project_name,
+    building: building_count > 1 ? building_ref : '',
+    scheduleId: view.id,
+    schedules: view.siblings || [{ id: view.id, code: schedule.code, title: schedule.title }],
+  });
 
   const page = el('div', { class: 'page page-wide' }, [
     el('div', { class: 'crumbs' }, [

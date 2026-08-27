@@ -295,3 +295,128 @@ valuable half.
 the only thing stopping someone silently changing the identity of a document
 already issued to a client is the lock in SPEC.md 5.5. It is enforced in
 `core/numbering.py`, not in the UI.
+
+---
+
+# V1.2
+
+Five things were unsatisfying about V1.1 in use, and each has a decision behind
+how it was fixed rather than a pile of features.
+
+## The grid is a spreadsheet, and the rules that say so live outside the DOM
+
+The grid had one editable cell at a time. Everything an engineer does to a
+schedule — copy a block, clear a range, fill a column — was either impossible or
+a per-cell chore, so people exported to Excel, worked there, and pasted back.
+
+It now has an active cell and a rectangle around it. What matters is where the
+rules live: `frontend/js/grid/` holds the selection model, the keyboard rules
+and the block-paste planner as plain modules with no DOM in them, tested under
+Node and run from `pytest`. "Shift+Down twice then Left once" has an exact
+answer, and a rule that is only ever exercised by hand is a rule that quietly
+stops working.
+
+There is still no build step. Node is a test dependency, not a runtime one, and
+those tests skip themselves when it is absent, exactly as the ones needing
+LibreOffice do.
+
+## A destructive operation is planned, shown, and only then performed
+
+`core/tabular.py` plans a paste: how many rows, whether the first line is a
+header, what would be appended, inserted or removed, and how much of what would
+go carries typed values. The same planner produces the preview and performs the
+paste, so the numbers somebody confirms are the numbers that happen. Replacing
+every row is refused unless confirmed, and only when there is something to lose.
+
+The library importer works the same way, because the same thing is true of it: a
+careless column mapping can overwrite a hundred correct values in one click.
+
+## Undo is a restore, not an inverse
+
+`services/history.py` records the rows before and after each risky edit. The
+alternative — an inverse operation per action — has to be right separately for
+paste, delete, duplicate and fill, and the one that is subtly wrong is the one
+that loses somebody's work. A schedule is tens of rows of small JSON, so a
+whole-schedule snapshot is cheaper than being clever. Twenty deep, per schedule,
+and a new edit discards the redo stack as every spreadsheet does.
+
+Keystroke saves are deliberately not on the stack: the browser's own undo
+reverses typing, and filling the stack with it would bury the paste somebody
+actually wants back.
+
+## Notes layer, and a schedule says whether it has diverged
+
+Four layers, general to specific: the practice's standing wording, what the job
+adds, what the equipment type says, and what one document says instead.
+`core/notes.py` resolves them and labels each line with where it came from,
+because "why does this schedule say that" is the question and an unlabelled list
+cannot answer it.
+
+A schedule that overrides **replaces** the resolved set rather than appending to
+it. The reason to override is usually that one inherited note is wrong for this
+document, and a model that can only add cannot express that. Reverting therefore
+always means the same thing: drop this schedule's own copy.
+
+## Branding is configuration, not a canvas
+
+SPEC.md's warning stands: the hand-made branded originals carry drawing objects
+that cannot be round-tripped through openpyxl. A freeform document designer would
+either lose them or lie about what it produced.
+
+So `core/branding.py` offers the decisions the renderer can carry out honestly —
+a logo, a font from a list every machine has, a palette, and which cover and
+revision-page fields appear and in what order. Hiding Building Number is a
+checkbox; moving it two inches left is not on offer, and saying so plainly is
+better than half-doing it.
+
+The important guarantee: a field the workbook reads by formula cannot be hidden.
+The settings screen shows it as fixed and the resolver refuses to drop it, so a
+configured document can never be produced with a broken reference in it.
+
+## An export is a document, not a working file
+
+The colour contract — blue on yellow you type, green from the library, black
+calculated — is an editing aid. It carries meaning while a schedule is being
+filled in and makes an issued PDF look like somebody's screen. Exports now
+default to a neutral print theme, xlsx as well as PDF, and `?theme=editor`
+returns the working copy. The two hold identical values; only the styling
+differs, and there is a test that says so.
+
+Three export defects were found by rendering real PDFs and looking at them,
+which is the only way any of them would have been found:
+
+- the Metadata sheet carries no print area, so LibreOffice printed it — two
+  pages of key/value pairs in front of every cover. Hidden on an issued
+  document, still readable by anything that consumes it.
+- a 30pt title ran off the page and over the line below it on any schedule with
+  a long name. It wraps to two lines now, and shrinks only if that will not fit.
+- an issued schedule carried the house standard's forty ruled empty rows under
+  six units. A working file still does, because somebody is about to fill them
+  in.
+
+## Sharing is the feature, so the change log is not optional
+
+A library value is read rather than copied. A type's columns are the type's. The
+house notes print on every document. That is what makes the tool worth using and
+it is also why somebody opens a schedule they have not touched and finds it
+different.
+
+Every one of those changes was already recorded where it happened — a type's own
+history, the library's change log — and nowhere a person would look.
+`services/impact.py` assembles them into one page, adds the standing condition
+that is not an event at all (schedules built before a change), and the designer
+dry-runs a column change against the schedules already using it before saving.
+
+`core.compare_columns` separates a presentational change from one that can
+orphan typed values: widths and order propagate and are meant to, while a rename
+leaves rows keyed under a name nothing reads any more, and that is worth saying
+out loud rather than discovering later.
+
+## Additive schema upgrades
+
+`Base.metadata.create_all` never alters an existing table, so a column added
+after somebody has been using the tool would simply not be there. `db/upgrade.py`
+compares the models against the database and adds what is missing. Deliberately
+one-directional: nothing there drops a column, renames one, or rewrites a value.
+An additive change is the only kind that cannot destroy somebody's work, and
+anything beyond it deserves a real migration tool and a backup.

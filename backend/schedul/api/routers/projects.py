@@ -87,6 +87,7 @@ def list_projects(
                     len(svc.live_schedules(session, b)) for b in buildings
                 ),
                 updated_at=p.updated_at,
+                buildings=[b.label for b in buildings],
             )
         )
     return out

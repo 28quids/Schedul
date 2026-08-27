@@ -51,7 +51,15 @@ export async function projectsView() {
         el('div', { class: 'muted tiny', text: p.name || 'Untitled project' }),
       ]),
       el('td', { text: p.client || '—' }),
-      el('td', { class: 'num', text: String(p.building_count) }),
+      el('td', {}, [
+        // Which blocks, not just how many: a job is remembered by its buildings.
+        p.buildings && p.buildings.length
+          ? el('span', { class: 'tiny', text: p.buildings.slice(0, 3).join(', ') })
+          : el('span', { class: 'muted', text: '—' }),
+        p.buildings && p.buildings.length > 3
+          ? el('span', { class: 'muted tiny', text: ` +${p.buildings.length - 3}` })
+          : null,
+      ]),
       el('td', { class: 'num', text: String(p.schedule_count) }),
       el('td', { class: 'muted tiny nowrap', text: formatDate(p.updated_at) }),
     ])
@@ -60,7 +68,7 @@ export async function projectsView() {
   page.appendChild(el('section', { class: 'card' }, [
     el('div', { class: 'card-body tight' }, [
       table(
-        ['Project', 'Client', { text: 'Buildings', class: 'num' }, { text: 'Schedules', class: 'num' }, 'Updated'],
+        ['Project', 'Client', 'Buildings', { text: 'Schedules', class: 'num' }, 'Updated'],
         rows
       ),
     ]),

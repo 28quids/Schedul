@@ -5,13 +5,13 @@
 // has the building; only the UI collapses.
 
 import { api } from '../api.js';
-import { go, refresh, store } from '../app.js';
+import { go, refresh, setContext, store } from '../app.js';
 import {
   button, card, clear, confirmDialog, download, el, empty, fail, field, formatDate,
   input, modal, mount, notice, pill, select, show, table, toast,
 } from '../ui.js';
 
-let state = { project: null, buildingId: null, tab: 'schedules' };
+let state = { project: null, buildingId: null, tab: 'schedules', query: '' };
 
 export async function projectView(projectId) {
   const [project, catalogue, meta] = await Promise.all([
@@ -26,12 +26,14 @@ export async function projectView(projectId) {
     state.project && state.project.id === projectId &&
     project.buildings.some((b) => b.id === state.buildingId);
 
+  const sameProject = state.project && state.project.id === projectId;
   state = {
     project,
     catalogue,
     statuses,
     buildingId: keepBuilding ? state.buildingId : (project.buildings[0] || {}).id,
-    tab: state.project && state.project.id === projectId ? state.tab : 'schedules',
+    tab: sameProject ? state.tab : 'schedules',
+    query: sameProject ? state.query : '',
   };
 
   draw();
@@ -54,6 +56,16 @@ async function reload() {
 function draw() {
   const p = state.project;
   const multi = p.buildings.length > 1;
+  const current = building();
+
+  setContext({
+    projectId: p.id,
+    projectName: p.number || p.name || 'Project',
+    building: multi && current ? current.label : (current ? current.name : ''),
+    schedules: (current ? current.schedules : []).map((s) => ({
+      id: s.id, code: s.code, title: s.title,
+    })),
+  });
 
   const page = el('div', { class: 'page page-wide' }, [
     el('div', { class: 'crumbs' }, [
@@ -96,6 +108,7 @@ function draw() {
   mount(page);
 
   if (state.tab === 'schedules') drawSchedules(body);
+  else if (state.tab === 'rooms') drawRooms(body);
   else if (state.tab === 'setup') drawSetup(body);
   else if (state.tab === 'numbering') drawNumbering(body);
   else drawHealth(body);
@@ -104,6 +117,7 @@ function draw() {
 function tabs() {
   const items = [
     ['schedules', 'Schedules'],
+    ['rooms', 'Rooms'],
     ['setup', 'Setup'],
     ['numbering', 'Numbering'],
     ['health', 'Health check'],
@@ -134,7 +148,20 @@ function drawSchedules(root) {
   const used = new Set(b.schedules.map((s) => s.code));
   const available = state.catalogue.filter((t) => !used.has(t.code));
 
-  const rows = b.schedules.map((s) => {
+  // Search here for the same reason the register has it: a job with twenty
+  // schedules across four blocks is a list nobody reads, they scan it.
+  const matches = (s) => {
+    if (!state.query) return true;
+    const haystack = [
+      s.code, s.title, s.docnum, s.filename, s.revision, s.status,
+      s.status_description, String(s.number),
+    ].join(' ').toLowerCase();
+    return state.query.toLowerCase().split(/\s+/).filter(Boolean)
+      .every((term) => haystack.includes(term));
+  };
+  const visible = b.schedules.filter(matches);
+
+  const rows = visible.map((s) => {
     const stale = s.type_version < s.latest_type_version;
     return el('tr', { class: 'clickable', on: { click: () => go(`/schedules/${s.id}`) } }, [
       el('td', { class: 'num mono', text: String(s.number) }),
@@ -181,6 +208,7 @@ function drawSchedules(root) {
         el('div', { class: 'hint', text: 'Numbering restarts in each building, so blocks stay independent.' }),
       ]),
       el('div', { class: 'btn-row' }, [
+        b.schedules.length > 3 ? scheduleSearch() : null,
         available.length
           ? select(
               [['', 'Add a schedule…'], ...available.map((t) => [t.code, `${t.code} — ${t.title}`])],
@@ -191,18 +219,23 @@ function drawSchedules(root) {
       ]),
     ]),
     el('div', { class: 'card-body tight' }, [
-      b.schedules.length
-        ? table(
-            [
-              { text: 'No.', class: 'num' }, 'Type', 'Document number',
-              { text: 'Rows', class: 'num' }, 'Rev', 'Issued', 'Status', '', '',
-            ],
-            rows
-          )
-        : empty(
+      !b.schedules.length
+        ? empty(
             'No schedules in this building yet',
             'Pick a type above. It gets the next number in this building and is ready to fill in.'
-          ),
+          )
+        : visible.length
+          ? table(
+              [
+                { text: 'No.', class: 'num' }, 'Type', 'Document number',
+                { text: 'Rows', class: 'num' }, 'Rev', 'Issued', 'Status', '', '',
+              ],
+              rows
+            )
+          : empty(
+              'Nothing matches',
+              `None of the ${b.schedules.length} schedules here match “${state.query}”.`
+            ),
     ]),
   ]));
 
@@ -213,6 +246,24 @@ function drawSchedules(root) {
       'info'
     ));
   }
+}
+
+/** The project page's filter. Redraws the list without rebuilding the page. */
+function scheduleSearch() {
+  const box = input(state.query, {
+    placeholder: 'Filter schedules…',
+    style: 'min-width:200px',
+  });
+  box.addEventListener('input', () => {
+    state.query = box.value.trim();
+    clearTimeout(box._timer);
+    box._timer = setTimeout(() => {
+      draw();
+      const fresh = document.querySelector('.sheet-search input, .card-head input[type=text]');
+      if (fresh) { fresh.focus(); fresh.setSelectionRange(fresh.value.length, fresh.value.length); }
+    }, 200);
+  });
+  return box;
 }
 
 function singleBuildingBar() {
@@ -547,6 +598,103 @@ async function bulkRevision() {
     toast(`${result.applied} schedule(s) revised`, 'ok');
     await reload();
   } catch (error) { fail(error); }
+}
+
+/* ---------------------------------------------------------------- rooms --- */
+
+/**
+ * What equipment is in each room on this job.
+ *
+ * The schedules hold the answer already; what they cannot do is be asked it one
+ * file at a time. It lived only behind a button on the register, which is not
+ * where somebody working on a project is.
+ */
+async function drawRooms(root) {
+  const p = state.project;
+  const box = el('div', { class: 'muted', text: 'Gathering…' });
+  root.appendChild(box);
+
+  let data;
+  try {
+    data = await api.get(`/api/projects/${p.id}/rooms`);
+  } catch (error) { clear(box).appendChild(notice(error.message, 'error')); return; }
+  clear(box);
+
+  if (!data.rooms.length) {
+    box.appendChild(card('Rooms', empty(
+      'No rooms recorded yet',
+      'Rooms come from the room or space column on each schedule. Fill some in and they ' +
+      'will be grouped here.'
+    )));
+    return;
+  }
+
+  const search = input('', { placeholder: 'Find a room…', style: 'min-width:220px' });
+  const list = el('div');
+
+  const render = () => {
+    clear(list);
+    const needle = search.value.trim().toLowerCase();
+    const rooms = needle
+      ? data.rooms.filter((r) => r.room.toLowerCase().includes(needle))
+      : data.rooms;
+
+    if (!rooms.length) {
+      list.appendChild(empty('Nothing matches', `No room here is called “${search.value}”.`));
+      return;
+    }
+
+    for (const room of rooms) {
+      list.appendChild(el('div', { class: 'room-block' }, [
+        el('div', { class: 'room-head' }, [
+          el('strong', { text: room.room }),
+          el('span', { class: 'muted tiny' }, [
+            Object.entries(room.by_type).map(([c, n]) => `${n}× ${c}`).join(', '),
+          ]),
+        ]),
+        table(
+          ['Type', 'Reference', 'Model', 'Building', ''],
+          room.items.map((i) => el('tr', {}, [
+            el('td', { class: 'tiny', text: i.code }),
+            el('td', { class: 'tiny', text: i.reference || '—' }),
+            el('td', { class: 'tiny mono', text: i.model_reference || '—' }),
+            el('td', { class: 'tiny muted', text: i.building }),
+            el('td', { class: 'cell-actions' }, [
+              button('Open', {
+                class: 'btn btn-sm',
+                on: { click: () => go(`/schedules/${i.schedule_id}`) },
+              }),
+            ]),
+          ]))
+        ),
+      ]));
+    }
+  };
+  search.addEventListener('input', render);
+  render();
+
+  const columns = Object.entries(data.room_columns);
+  box.appendChild(card(
+    `${data.rooms.length} room(s)`,
+    el('div', {}, [
+      data.unassigned
+        ? notice(
+            `${data.unassigned} row(s) have no room recorded, so they are not listed here.`,
+            'warn'
+          )
+        : null,
+      list,
+      columns.length
+        ? el('p', { class: 'muted tiny' }, [
+            'Rooms were read from: ',
+            columns.map(([code, column]) => `${code} → ${column}`).join(', '),
+            '. Which column names a room varies by type, so the first one that looks like ' +
+            'a room is used — a wrong guess should be visible rather than hidden.',
+          ])
+        : null,
+    ]),
+    [search]
+  ));
 }
 
 /* ---------------------------------------------------------------- setup --- */

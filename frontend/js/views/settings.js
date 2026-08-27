@@ -53,6 +53,10 @@ export async function settingsView() {
   /* -------------------------------------------------------- numbering --- */
 
   const pattern = input(house.naming.pattern, { class: 'mono' });
+  // The descriptor on the end of a filename. The v1 files carried the full
+  // schedule title, which makes an issued filename long enough to be awkward in
+  // a document management system; a practice can shorten or drop it.
+  const suffix = input(house.naming.suffix ?? '_-_{title_slug}', { class: 'mono' });
   const tokenBox = el('div');
   const problemBox = el('div');
 
@@ -99,6 +103,16 @@ export async function settingsView() {
   };
   renderTokens();
 
+  const showFilename = () => {
+    const node = document.getElementById('filename-preview');
+    if (!node) return;
+    const ending = suffix.value.replace('{title_slug}', 'Fan_Coil_Unit_Schedule');
+    node.textContent =
+      `A schedule would be filed as: CM4220-BOV-5_6-HQ049-SC-M-00000010-G00300-XX-XX${ending}.xlsx`;
+  };
+  suffix.addEventListener('input', showFilename);
+  setTimeout(showFilename, 0);
+
   if (settings.naming_problems.length) {
     problemBox.appendChild(notice('The pattern has problems:', 'error', settings.naming_problems));
   }
@@ -106,7 +120,12 @@ export async function settingsView() {
   const saveNaming = async () => {
     try {
       const result = await api.settings.update({
-        naming: { ...house.naming, pattern: pattern.value, tokens },
+        naming: {
+          ...house.naming,
+          pattern: pattern.value,
+          suffix: suffix.value,
+          tokens,
+        },
       });
       clear(problemBox);
       if (result.naming_problems.length) {
@@ -122,6 +141,16 @@ export async function settingsView() {
     el('div', {}, [
       problemBox,
       field('Pattern', pattern, 'Every {token} must be defined below.'),
+      el('div', { style: 'margin-top:12px' }, [
+        field(
+          'Filename ending',
+          suffix,
+          '{title_slug} becomes the schedule title. Leave it blank for a filename that ' +
+          'is just the document number — the title is on the cover and in the register ' +
+          'either way.'
+        ),
+        el('div', { class: 'muted tiny', id: 'filename-preview' }),
+      ]),
       el('div', { style: 'margin-top:14px' }, [tokenBox]),
       el('p', { class: 'help muted', style: 'margin-top:10px' }, [
         'Scope decides where a value can be overridden: company is fixed for the practice, ' +

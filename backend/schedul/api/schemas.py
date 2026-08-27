@@ -132,6 +132,9 @@ class ProjectSummary(BaseModel):
     building_count: int
     schedule_count: int
     updated_at: _dt.datetime | None = None
+    #: The buildings' labels. A project number alone does not say which block
+    #: somebody was in, and on a job of several that is the thing they remember.
+    buildings: list[str] = Field(default_factory=list)
 
 
 class ProjectOut(ProjectSummary):
