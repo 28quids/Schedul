@@ -146,6 +146,14 @@ export const api = {
     list: (code, q = '') =>
       request('GET', `/api/library/${encodeURIComponent(code)}?q=${encodeURIComponent(q)}`),
     save: (body) => request('POST', '/api/library', body),
+    saveMany: (code, rows) =>
+      request('POST', '/api/library/bulk', { type_code: code, rows }),
+    importColumns: (code) =>
+      request('GET', `/api/library/${encodeURIComponent(code)}/import/columns`),
+    // The same endpoint plans and applies; only `apply` differs, so the preview
+    // and the import can never disagree about what would happen.
+    importPreview: (body) => request('POST', '/api/library/import', body),
+    importApply: (body) => request('POST', '/api/library/import', { ...body, apply: true }),
     inspect: (body) => request('POST', '/api/library/inspect', body),
     update: (id, body) => request('PUT', `/api/library/${id}`, body),
     queue: () => request('GET', '/api/library/review/queue'),

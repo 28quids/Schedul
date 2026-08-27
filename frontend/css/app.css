@@ -582,3 +582,25 @@ tr.detail-row > td { background: var(--grey-50); padding: 8px 12px; }
 .doc-footer { font-size: 10px; color: var(--grey-500); margin-top: 18px; }
 .doc-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
 .doc-table td { padding: 2px 4px; border-bottom: 1px solid var(--grey-100); }
+
+/* ------------------------------------------------------- library entry --- */
+
+.entry-grid { max-height: 340px; overflow: auto; }
+.entry-grid table { font-size: 12px; }
+.entry-grid th { vertical-align: top; }
+.entry-grid td.cell-input { padding: 0; }
+.entry-grid td.cell-input input {
+  border: none; border-radius: 0; background: var(--input-fill); color: var(--input-text);
+  font-size: 12px; padding: 4px 7px; width: 100%; font-family: inherit; min-width: 110px;
+}
+.entry-grid td.cell-input input:focus { box-shadow: inset 0 0 0 2px var(--blue); }
+.entry-grid td.rowno { background: var(--grey-50); color: var(--grey-500); text-align: center; }
+.lock-toggle { display: flex; gap: 4px; align-items: center; color: var(--grey-600); font-weight: 400; }
+
+.mapping-row { margin-top: 14px; }
+.mapping-controls {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;
+  margin-top: 6px;
+}
+.mapping-item { border: 1px solid var(--grey-200); border-radius: var(--radius); padding: 6px 8px; }
+.mapping-item select { margin-top: 4px; }

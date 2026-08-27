@@ -15,7 +15,7 @@ __all__ = [
     "PasteIn", "PastePreviewIn", "CellEdit", "CellsIn", "DeleteRowsIn", "FillIn",
     "ScheduleNotesIn",
     "RevisionIn", "RevisionOut",
-    "EquipmentIn", "EquipmentOut",
+    "EquipmentIn", "EquipmentOut", "LibraryImportIn", "BulkEquipmentIn",
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
     "RenumberIn", "PlanOut", "PlanChange",
     "RegisterRow", "AuditOut", "HouseStandardIn",
@@ -352,6 +352,34 @@ class EquipmentIn(BaseModel):
     type_code: str
     model_reference: str
     values: dict[str, Any] = Field(default_factory=dict)
+    created_by: str = ""
+
+
+class LibraryImportIn(BaseModel):
+    """A block of product data to bring into the library.
+
+    ``apply`` is false by default: an import is planned, shown, and only then
+    carried out. A careless mapping can overwrite a hundred correct values in
+    one click, so the dry run is the default and applying is the exception.
+    """
+
+    type_code: str
+    text: str = ""
+    #: The caller's column choice, position by position. Omit to match the
+    #: header by name, or to take the columns left to right.
+    mapping: list[str | None] | None = None
+    header: bool | None = None
+    #: False leaves products already in the library alone.
+    update_existing: bool = True
+    apply: bool = False
+    created_by: str = ""
+
+
+class BulkEquipmentIn(BaseModel):
+    """Several products entered at once in the grid editor."""
+
+    type_code: str
+    rows: list["EquipmentIn"] = Field(default_factory=list)
     created_by: str = ""
 
 
