@@ -100,10 +100,21 @@ export const api = {
     updateRow: (id, rowId, values, overrides) =>
       request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values, overrides }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),
+    deleteRows: (id, rowIds) =>
+      request('POST', `/api/schedules/${id}/rows/delete`, { row_ids: rowIds }),
     duplicateRow: (id, rowId) =>
       request('POST', `/api/schedules/${id}/rows/${rowId}/duplicate`),
+    editCells: (id, edits, action = 'cells') =>
+      request('POST', `/api/schedules/${id}/rows/cells`, { edits, action }),
     paste: (id, body) => request('POST', `/api/schedules/${id}/rows/paste`, body),
+    pastePreview: (id, body) =>
+      request('POST', `/api/schedules/${id}/rows/paste/preview`, body),
     fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
+    notes: (id) => request('GET', `/api/schedules/${id}/notes`),
+    setNotes: (id, notes) => request('PUT', `/api/schedules/${id}/notes`, { notes }),
+    customiseNotes: (id) => request('POST', `/api/schedules/${id}/notes/customise`),
+    undo: (id) => request('POST', `/api/schedules/${id}/undo`),
+    redo: (id) => request('POST', `/api/schedules/${id}/redo`),
 
     revisions: (id) => request('GET', `/api/schedules/${id}/revisions`),
     nextRevision: (id, published) =>
@@ -127,6 +138,7 @@ export const api = {
     update: (id, body) => request('PUT', `/api/catalogue/${id}`, body),
     validate: (body) => request('POST', '/api/catalogue/validate', body),
     usage: (id) => request('GET', `/api/catalogue/${id}/usage`),
+    impact: (id, body) => request('POST', `/api/catalogue/${id}/impact`, body),
     archive: (id) => request('DELETE', `/api/catalogue/${id}`),
   },
 
@@ -134,6 +146,14 @@ export const api = {
     list: (code, q = '') =>
       request('GET', `/api/library/${encodeURIComponent(code)}?q=${encodeURIComponent(q)}`),
     save: (body) => request('POST', '/api/library', body),
+    saveMany: (code, rows) =>
+      request('POST', '/api/library/bulk', { type_code: code, rows }),
+    importColumns: (code) =>
+      request('GET', `/api/library/${encodeURIComponent(code)}/import/columns`),
+    // The same endpoint plans and applies; only `apply` differs, so the preview
+    // and the import can never disagree about what would happen.
+    importPreview: (body) => request('POST', '/api/library/import', body),
+    importApply: (body) => request('POST', '/api/library/import', { ...body, apply: true }),
     inspect: (body) => request('POST', '/api/library/inspect', body),
     update: (id, body) => request('PUT', `/api/library/${id}`, body),
     queue: () => request('GET', '/api/library/review/queue'),
@@ -142,11 +162,16 @@ export const api = {
     remove: (id) => request('DELETE', `/api/library/${id}`),
   },
 
+  impact: (area = '') => request('GET', `/api/impact${area ? `?area=${area}` : ''}`),
+
   register: (projectId) =>
     request('GET', `/api/register${projectId ? `?project_id=${projectId}` : ''}`),
 
   settings: {
     read: () => request('GET', '/api/settings'),
     update: (body) => request('PUT', '/api/settings', body),
+    branding: () => request('GET', '/api/settings/branding'),
+    previewBranding: (branding) =>
+      request('POST', '/api/settings/branding/preview', { branding }),
   },
 };

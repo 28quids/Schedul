@@ -12,8 +12,10 @@ __all__ = [
     "BuildingIn", "BuildingOut",
     "ScheduleIn", "ScheduleOut",
     "RowIn", "RowOut", "GridOut", "GridColumn",
+    "PasteIn", "PastePreviewIn", "CellEdit", "CellsIn", "DeleteRowsIn", "FillIn",
+    "ScheduleNotesIn",
     "RevisionIn", "RevisionOut",
-    "EquipmentIn", "EquipmentOut",
+    "EquipmentIn", "EquipmentOut", "LibraryImportIn", "BulkEquipmentIn",
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
     "RenumberIn", "PlanOut", "PlanChange",
     "RegisterRow", "AuditOut", "HouseStandardIn",
@@ -82,6 +84,9 @@ class ProjectIn(BaseModel):
     approved_by: str = ""
     naming_overrides: dict[str, Any] = Field(default_factory=dict)
     design_constants: dict[str, Any] = Field(default_factory=dict)
+    #: Notes this job adds under the organisation's. None leaves them as they
+    #: are, so a form that does not carry them cannot blank them by omission.
+    notes: list[str] | None = None
 
 
 class ScheduleOut(BaseModel):
@@ -127,6 +132,9 @@ class ProjectSummary(BaseModel):
     building_count: int
     schedule_count: int
     updated_at: _dt.datetime | None = None
+    #: The buildings' labels. A project number alone does not say which block
+    #: somebody was in, and on a job of several that is the thing they remember.
+    buildings: list[str] = Field(default_factory=list)
 
 
 class ProjectOut(ProjectSummary):
@@ -140,6 +148,9 @@ class ProjectOut(ProjectSummary):
     naming_overrides: dict[str, Any] = Field(default_factory=dict)
     design_constants: dict[str, Any] = Field(default_factory=dict)
     effective_constants: dict[str, float] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+    #: The organisation's notes, shown above the project's in the editor.
+    organisation_notes: list[str] = Field(default_factory=list)
     buildings: list[BuildingOut] = Field(default_factory=list)
     naming_preview: dict[str, Any] = Field(default_factory=dict)
 
@@ -192,6 +203,20 @@ class GridOut(BaseModel):
     building_ref: str = ""
     building_count: int = 1
     notes: list[str] = Field(default_factory=list)
+    #: The resolved note layers, each carrying where it came from.
+    note_layers: list[dict[str, Any]] = Field(default_factory=list)
+    #: True when this schedule has its own notes rather than inheriting.
+    notes_customised: bool = False
+    #: Whether undo and redo are available, and of what.
+    history: dict[str, Any] = Field(default_factory=dict)
+    #: Set when the type has moved on since this schedule was built.
+    type_drift: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScheduleNotesIn(BaseModel):
+    """This schedule's own notes, or None to go back to inheriting them."""
+
+    notes: list[str] | None = None
 
 
 class RowIn(BaseModel):
@@ -206,23 +231,79 @@ class PasteIn(BaseModel):
     """Rows pasted from a spreadsheet, and what to do with them.
 
     Paste used to be replace-only, which made it an all-or-nothing destructive
-    action on a schedule someone had already filled in.
+    action on a schedule someone had already filled in. It now defaults to
+    appending, and the one mode that removes anything has to say so twice: once
+    by naming itself, and once by confirming the preview.
+
+    ``text`` is the raw clipboard block. Parsing it here rather than in the
+    browser is what lets the preview and the apply agree exactly -- they run the
+    same planner over the same text.
     """
 
     mode: Literal["replace", "append", "insert"] = "append"
     rows: list[RowIn] = Field(default_factory=list)
+    #: Raw tab-separated text. Takes precedence over ``rows`` when given.
+    text: str = ""
+    #: True/False forces the header decision; None detects one.
+    header: bool | None = None
     #: Where 'insert' puts them. Ignored by the other modes.
+    position: int = 0
+    #: Required before a replace may remove rows that carry typed values.
+    confirm: bool = False
+
+
+class PastePreviewIn(BaseModel):
+    """A paste to plan but not perform."""
+
+    mode: Literal["replace", "append", "insert"] = "append"
+    text: str = ""
+    header: bool | None = None
     position: int = 0
 
 
-class FillIn(BaseModel):
-    """Fill one column down from a starting row."""
+class CellEdit(BaseModel):
+    """One row's worth of a multi-cell edit.
 
-    column: str
+    Values are merged into the row rather than replacing it, so a rectangular
+    paste or a range delete touches only the columns it names.
+    """
+
+    row_id: str
+    values: dict[str, Any] = Field(default_factory=dict)
+    overrides: dict[str, Any] | None = None
+
+
+class CellsIn(BaseModel):
+    """A block of cell edits applied as one undoable step."""
+
+    edits: list[CellEdit] = Field(default_factory=list)
+    #: What to call this in the undo stack.
+    action: str = "cells"
+
+
+class DeleteRowsIn(BaseModel):
+    """Delete several rows at once, as one undoable step."""
+
+    row_ids: list[str] = Field(default_factory=list)
+
+
+class FillIn(BaseModel):
+    """Fill one or more columns down from a starting row.
+
+    ``columns`` fills a selected block; ``column`` remains for the single-column
+    case and for callers written before ranges existed.
+    """
+
+    column: str = ""
+    columns: list[str] = Field(default_factory=list)
     start_position: int
     #: How many rows below the start to fill. Omit to reach the end.
     count: int | None = None
     mode: Literal["series", "copy"] = "series"
+
+    @property
+    def target_columns(self) -> list[str]:
+        return self.columns or ([self.column] if self.column else [])
 
 
 # -------------------------------------------------------------- revisions ---
@@ -274,6 +355,34 @@ class EquipmentIn(BaseModel):
     type_code: str
     model_reference: str
     values: dict[str, Any] = Field(default_factory=dict)
+    created_by: str = ""
+
+
+class LibraryImportIn(BaseModel):
+    """A block of product data to bring into the library.
+
+    ``apply`` is false by default: an import is planned, shown, and only then
+    carried out. A careless mapping can overwrite a hundred correct values in
+    one click, so the dry run is the default and applying is the exception.
+    """
+
+    type_code: str
+    text: str = ""
+    #: The caller's column choice, position by position. Omit to match the
+    #: header by name, or to take the columns left to right.
+    mapping: list[str | None] | None = None
+    header: bool | None = None
+    #: False leaves products already in the library alone.
+    update_existing: bool = True
+    apply: bool = False
+    created_by: str = ""
+
+
+class BulkEquipmentIn(BaseModel):
+    """Several products entered at once in the grid editor."""
+
+    type_code: str
+    rows: list["EquipmentIn"] = Field(default_factory=list)
     created_by: str = ""
 
 

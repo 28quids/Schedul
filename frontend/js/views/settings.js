@@ -7,6 +7,9 @@ import { api } from '../api.js';
 import {
   button, card, clear, el, fail, field, input, mount, notice, pill, select, table, toast,
 } from '../ui.js';
+import { brandingSection } from './branding.js';
+
+const state = { tab: 'numbering' };
 
 export async function settingsView() {
   const settings = await api.settings.read();
@@ -22,11 +25,38 @@ export async function settingsView() {
         }),
       ]),
     ]),
+    el('div', { class: 'tabs' }, [
+      ['numbering', 'Numbering'],
+      ['content', 'Notes and constants'],
+      ['branding', 'Branding'],
+    ].map(([key, label]) =>
+      el('button', {
+        class: `tab${state.tab === key ? ' active' : ''}`,
+        on: { click: () => { state.tab = key; settingsView(); } },
+      }, [label])
+    )),
   ]);
+
+  // Branding is its own screen's worth of settings, and it is the one that
+  // decides what a document looks like rather than what it is called.
+  if (state.tab === 'branding') {
+    const host = el('div');
+    page.appendChild(host);
+    mount(page);
+    await brandingSection(host);
+    return;
+  }
+
+  /** Append a card only when its tab is the one being shown. */
+  const add = (tab, node) => { if (state.tab === tab) page.appendChild(node); };
 
   /* -------------------------------------------------------- numbering --- */
 
   const pattern = input(house.naming.pattern, { class: 'mono' });
+  // The descriptor on the end of a filename. The v1 files carried the full
+  // schedule title, which makes an issued filename long enough to be awkward in
+  // a document management system; a practice can shorten or drop it.
+  const suffix = input(house.naming.suffix ?? '_-_{title_slug}', { class: 'mono' });
   const tokenBox = el('div');
   const problemBox = el('div');
 
@@ -73,6 +103,16 @@ export async function settingsView() {
   };
   renderTokens();
 
+  const showFilename = () => {
+    const node = document.getElementById('filename-preview');
+    if (!node) return;
+    const ending = suffix.value.replace('{title_slug}', 'Fan_Coil_Unit_Schedule');
+    node.textContent =
+      `A schedule would be filed as: CM4220-BOV-5_6-HQ049-SC-M-00000010-G00300-XX-XX${ending}.xlsx`;
+  };
+  suffix.addEventListener('input', showFilename);
+  setTimeout(showFilename, 0);
+
   if (settings.naming_problems.length) {
     problemBox.appendChild(notice('The pattern has problems:', 'error', settings.naming_problems));
   }
@@ -80,7 +120,12 @@ export async function settingsView() {
   const saveNaming = async () => {
     try {
       const result = await api.settings.update({
-        naming: { ...house.naming, pattern: pattern.value, tokens },
+        naming: {
+          ...house.naming,
+          pattern: pattern.value,
+          suffix: suffix.value,
+          tokens,
+        },
       });
       clear(problemBox);
       if (result.naming_problems.length) {
@@ -91,11 +136,21 @@ export async function settingsView() {
     } catch (error) { fail(error); }
   };
 
-  page.appendChild(card(
+  add('numbering', card(
     'Document numbering',
     el('div', {}, [
       problemBox,
       field('Pattern', pattern, 'Every {token} must be defined below.'),
+      el('div', { style: 'margin-top:12px' }, [
+        field(
+          'Filename ending',
+          suffix,
+          '{title_slug} becomes the schedule title. Leave it blank for a filename that ' +
+          'is just the document number — the title is on the cover and in the register ' +
+          'either way.'
+        ),
+        el('div', { class: 'muted tiny', id: 'filename-preview' }),
+      ]),
       el('div', { style: 'margin-top:14px' }, [tokenBox]),
       el('p', { class: 'help muted', style: 'margin-top:10px' }, [
         'Scope decides where a value can be overridden: company is fixed for the practice, ' +
@@ -113,12 +168,13 @@ export async function settingsView() {
     value: house.general_notes.join('\n'),
   });
 
-  page.appendChild(card(
+  add('content', card(
     'General notes',
     el('div', {}, [
       el('p', { class: 'muted tiny' }, [
-        'One per line. These print at the top of every schedule, before any notes specific ' +
-        'to the equipment type.',
+        'One per line. These print at the top of every schedule in the practice, before ' +
+        'anything a project adds and before anything specific to the equipment type. A ' +
+        'single schedule can still take its notes over if it has to say something else.',
       ]),
       notesArea,
     ]),
@@ -149,7 +205,7 @@ export async function settingsView() {
     ]);
   });
 
-  page.appendChild(card(
+  add('content', card(
     'Design constants',
     table(['Constant', 'Default'], constantRows),
     [button('Save constants', {
@@ -181,7 +237,7 @@ export async function settingsView() {
     house.numbering_scope || 'building'
   );
 
-  page.appendChild(card(
+  add('numbering', card(
     'How numbers are allocated',
     el('div', {}, [
       field('Scope', scope,
@@ -223,7 +279,7 @@ export async function settingsView() {
     ]);
   });
 
-  page.appendChild(card(
+  add('numbering', card(
     'Volumes and discipline',
     el('div', {}, [
       table(['Code', 'Description', 'Discipline'], volumeRows),
@@ -249,7 +305,7 @@ export async function settingsView() {
     })]
   ));
 
-  page.appendChild(card(
+  add('numbering', card(
     'Suitability codes',
     table(
       ['Code', 'Description'],

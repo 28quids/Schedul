@@ -15,7 +15,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..db.session import DATA_DIR, init_db
-from .routers import catalogue, exports, library, projects, schedules, settings
+from .routers import (
+    catalogue, exports, impact, library, projects, schedules, settings,
+)
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ app.include_router(catalogue.router)
 app.include_router(library.router)
 app.include_router(exports.router)
 app.include_router(settings.router)
+app.include_router(impact.router)
 
 
 @app.on_event("startup")

@@ -20,11 +20,15 @@ from ...services.converters import (
 )
 from ...services.columns import columns_for
 from ...services.issue import diff_snapshots, issue_revision
+from ...services import history as hist
+from ...services import notes as notes_svc
 from ...services.grid import build_grid, editable_payload, override_payload
 from ..deps import current_org, get_db, get_schedule, schedule_view
 from ...core.references import fill_series
+from ...core import tabular
 from ..schemas import (
-    FillIn, GridColumn, GridOut, PasteIn, RevisionIn, RevisionOut, RowIn, RowOut,
+    CellsIn, DeleteRowsIn, FillIn, GridColumn, GridOut, PasteIn, PastePreviewIn,
+    RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
 )
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -66,8 +70,39 @@ def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
         building_id=building.id,
         building_ref=building.ref,
         building_count=len(svc.buildings_of(session, project)),
-        notes=[*house.general_notes, *stype.notes],
+        **{
+            k: v for k, v in notes_svc.notes_view(schedule, stype, house, project).items()
+            if k in ("notes", "note_layers", "notes_customised")
+        },
+        history=hist.history_state(session, schedule.id),
+        type_drift=_type_drift(schedule),
     )
+
+
+def _type_drift(schedule: Schedule) -> dict[str, object]:
+    """Whether the catalogue type has moved on since this schedule was built.
+
+    The columns themselves are always the type's current ones -- that is what
+    makes a width or an order change in the designer show up here -- so this is
+    not a warning that the schedule is stale. It is the schedule saying which
+    version it was set up against, so somebody who finds a new column can see
+    where it came from.
+    """
+    type_row = schedule.schedule_type
+    if type_row is None or type_row.version <= schedule.type_version:
+        return {}
+    history = [
+        h for h in (type_row.history or [])
+        if int(h.get("version", 0)) >= schedule.type_version
+    ]
+    return {
+        "built_against": schedule.type_version,
+        "current": type_row.version,
+        "changes": [
+            {"version": h.get("version"), "date": h.get("date", ""), "change": h.get("change", "")}
+            for h in history[-6:]
+        ],
+    }
 
 
 @router.get("/{schedule_id}", response_model=GridOut)
@@ -79,6 +114,19 @@ def read_grid(
     return _grid(session, schedule, org)
 
 
+def _editable_names(stype) -> list[str]:
+    """The columns a user may type into, in the order they sit on the sheet."""
+    from ...core.catalogue import MODEL_REFERENCE
+
+    return [*(c.legacy_name for c in stype.inputs), MODEL_REFERENCE]
+
+
+def _row_dicts(schedule: Schedule) -> list[dict]:
+    return [
+        dict(r.values or {}) for r in sorted(schedule.rows, key=lambda r: r.position)
+    ]
+
+
 @router.post("/{schedule_id}/rows", response_model=GridOut, status_code=201)
 def add_row(
     payload: RowIn,
@@ -87,6 +135,7 @@ def add_row(
     org: Organisation = Depends(current_org),
 ) -> GridOut:
     stype = columns_for(schedule)
+    before = hist.snapshot_rows(schedule)
     position = (
         payload.position
         if payload.position is not None
@@ -102,6 +151,7 @@ def add_row(
     )
     session.flush()
     session.expire(schedule, ["rows"])
+    hist.record_edit(session, schedule, "add_row", before, summary="added a row")
     return _grid(session, schedule, org)
 
 
@@ -118,6 +168,9 @@ def update_row(
         raise HTTPException(status_code=404, detail="no such row")
 
     stype = columns_for(schedule)
+    before = hist.snapshot_rows(schedule)
+    had_overrides = dict(row.overrides or {})
+
     # Only input columns are accepted here. Library and derived values are
     # computed, so taking them from the client would store a stale value and
     # render it as fact on the export. A deliberate divergence goes in
@@ -129,6 +182,53 @@ def update_row(
         row.position = payload.position
     session.flush()
     session.expire(schedule, ["rows"])
+
+    # Typing is saved keystroke by keystroke and is undone by the browser's own
+    # undo; it does not belong on the stack. An override appearing or being
+    # cleared is a decision about where a value comes from, and does.
+    if (row.overrides or {}) != had_overrides:
+        hist.record_edit(
+            session, schedule, "overrides", before, summary="override change"
+        )
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/rows/cells", response_model=GridOut)
+def edit_cells(
+    payload: CellsIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Write a block of cells in one undoable step.
+
+    This is what a multi-cell paste and a range delete both come down to:
+    several rows, a few columns each, applied together so undo takes the whole
+    block back rather than one cell at a time. Values are merged into each row,
+    so columns the block does not name are left alone.
+    """
+    stype = columns_for(schedule)
+    rows = {r.id: r for r in schedule.rows}
+    before = hist.snapshot_rows(schedule)
+
+    for edit in payload.edits:
+        row = rows.get(edit.row_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no row {edit.row_id!r} on this schedule")
+        if edit.values:
+            row.values = {**(row.values or {}), **editable_payload(edit.values, stype)}
+        if edit.overrides is not None:
+            # An empty value clears the override and restores the library value,
+            # which is the same contract update_row uses.
+            merged = {**(row.overrides or {}), **edit.overrides}
+            row.overrides = override_payload(merged, stype)
+
+    session.flush()
+    session.expire(schedule, ["rows"])
+    hist.record_edit(
+        session, schedule, payload.action, before,
+        summary=f"{len(payload.edits)} row(s) edited",
+    )
     return _grid(session, schedule, org)
 
 
@@ -142,9 +242,46 @@ def delete_row(
     row = session.get(ScheduleRow, row_id)
     if row is None or row.schedule_id != schedule.id:
         raise HTTPException(status_code=404, detail="no such row")
+    before = hist.snapshot_rows(schedule)
     session.delete(row)
     session.flush()
     session.expire(schedule, ["rows"])
+    _renumber(sorted(schedule.rows, key=lambda r: r.position))
+    session.flush()
+    hist.record_edit(session, schedule, "delete_rows", before, summary="deleted a row")
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/rows/delete", response_model=GridOut)
+def delete_rows(
+    payload: DeleteRowsIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Delete a selection of rows as one undoable step."""
+    wanted = set(payload.row_ids)
+    rows = [r for r in schedule.rows if r.id in wanted]
+    missing = wanted - {r.id for r in rows}
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{len(missing)} of the rows are not on this schedule",
+        )
+    if not rows:
+        return _grid(session, schedule, org)
+
+    before = hist.snapshot_rows(schedule)
+    for row in rows:
+        session.delete(row)
+    session.flush()
+    session.expire(schedule, ["rows"])
+    _renumber(sorted(schedule.rows, key=lambda r: r.position))
+    session.flush()
+    hist.record_edit(
+        session, schedule, "delete_rows", before,
+        summary=f"deleted {len(rows)} row(s)",
+    )
     return _grid(session, schedule, org)
 
 
@@ -171,6 +308,7 @@ def duplicate_row(
     if source is None or source.schedule_id != schedule.id:
         raise HTTPException(status_code=404, detail="no such row")
 
+    before = hist.snapshot_rows(schedule)
     ordered = sorted(schedule.rows, key=lambda r: r.position)
     copy = ScheduleRow(
         schedule_id=schedule.id,
@@ -184,7 +322,43 @@ def duplicate_row(
     _renumber(ordered)
     session.flush()
     session.expire(schedule, ["rows"])
+    hist.record_edit(
+        session, schedule, "duplicate_row", before, summary="duplicated a row"
+    )
     return _grid(session, schedule, org)
+
+
+def _paste_plan(schedule: Schedule, stype, *, mode: str, text: str, header, position: int):
+    return tabular.plan_paste(
+        text,
+        mode=mode,
+        column_names=_editable_names(stype),
+        existing=_row_dicts(schedule),
+        position=position,
+        header=header,
+    )
+
+
+@router.post("/{schedule_id}/rows/paste/preview")
+def preview_paste(
+    payload: PastePreviewIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """What this paste would do, without doing any of it.
+
+    The dry run is the whole reason paste is safe now: the same planner that
+    produces this is the one the apply uses, so the numbers a user confirms are
+    the numbers that happen.
+    """
+    stype = columns_for(schedule)
+    plan = _paste_plan(
+        schedule, stype,
+        mode=payload.mode, text=payload.text,
+        header=payload.header, position=payload.position,
+    )
+    return {**plan.to_dict(), "editable_columns": _editable_names(stype)}
 
 
 @router.post("/{schedule_id}/rows/paste", response_model=GridOut)
@@ -194,12 +368,41 @@ def paste_rows(
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
 ) -> GridOut:
-    """Paste rows, replacing, appending or inserting.
+    """Paste rows, appending, inserting or replacing.
 
-    'replace' is the only destructive mode and the caller has to ask for it by
-    name, so a paste can no longer wipe a schedule somebody has filled in.
+    Appending is the default, 'replace' is the only mode that removes anything,
+    and it is refused unless the caller confirms it -- so a paste can neither
+    wipe a filled-in schedule by accident nor do it without being asked twice.
     """
     stype = columns_for(schedule)
+
+    if payload.text.strip():
+        plan = _paste_plan(
+            schedule, stype,
+            mode=payload.mode, text=payload.text,
+            header=payload.header, position=payload.position,
+        )
+        parsed = [RowIn(values=values) for values in plan.rows]
+    else:
+        plan = None
+        parsed = list(payload.rows)
+
+    if payload.mode == "replace" and not payload.confirm:
+        populated = (
+            plan.populated_removed
+            if plan is not None
+            else sum(1 for r in _row_dicts(schedule) if any(v not in (None, "") for v in r.values()))
+        )
+        if populated:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"replacing every row would remove {populated} row(s) that have been "
+                    f"filled in. Confirm the preview to go ahead, or append instead."
+                ),
+            )
+
+    before = hist.snapshot_rows(schedule)
     incoming = [
         ScheduleRow(
             schedule_id=schedule.id,
@@ -207,7 +410,7 @@ def paste_rows(
             values=editable_payload(item.values, stype),
             overrides=override_payload(item.overrides or {}, stype),
         )
-        for item in payload.rows
+        for item in parsed
     ]
 
     if payload.mode == "replace":
@@ -225,6 +428,10 @@ def paste_rows(
     _renumber(ordered)
     session.flush()
     session.expire(schedule, ["rows"])
+    hist.record_edit(
+        session, schedule, "paste", before,
+        summary=f"pasted {len(incoming)} row(s)",
+    )
     return _grid(session, schedule, org)
 
 
@@ -237,7 +444,7 @@ def replace_rows(
 ) -> GridOut:
     """Replace every row at once. Superseded by /rows/paste with mode=replace."""
     return paste_rows(
-        PasteIn(mode="replace", rows=payload), schedule, session, org
+        PasteIn(mode="replace", rows=payload, confirm=True), schedule, session, org
     )
 
 
@@ -248,20 +455,28 @@ def fill_down(
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
 ) -> GridOut:
-    """Fill one column down from a row, counting up where the value ends in digits.
+    """Fill one or more columns down from a row, counting up where a value ends
+    in digits.
 
     The increment rule lives in core.references so the grid, an importer and a
-    bulk-add all produce the same thing.
+    bulk-add all produce the same thing. ``count`` bounds the fill to a selected
+    range rather than running to the end of the schedule.
     """
     stype = columns_for(schedule)
-    column = stype.column(payload.column)
-    key = column.legacy_name if column is not None else payload.column
-    editable = {c.legacy_name for c in stype.inputs} | {"Model Reference"}
-    if key not in editable:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{payload.column!r} is calculated or looked up, so it cannot be filled",
-        )
+    editable = set(_editable_names(stype))
+
+    keys: list[str] = []
+    for name in payload.target_columns:
+        column = stype.column(name)
+        key = column.legacy_name if column is not None else name
+        if key not in editable:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name!r} is calculated or looked up, so it cannot be filled",
+            )
+        keys.append(key)
+    if not keys:
+        raise HTTPException(status_code=400, detail="no column to fill was given")
 
     ordered = sorted(schedule.rows, key=lambda r: r.position)
     start = next((i for i, r in enumerate(ordered) if r.position == payload.start_position), None)
@@ -274,13 +489,106 @@ def fill_down(
     if not below:
         return _grid(session, schedule, org)
 
-    seed = (ordered[start].values or {}).get(key, "")
-    for row, value in zip(below, fill_series(seed, len(below), mode=payload.mode)):
-        row.values = {**(row.values or {}), key: value}
+    before = hist.snapshot_rows(schedule)
+    for key in keys:
+        seed = (ordered[start].values or {}).get(key, "")
+        for row, value in zip(below, fill_series(seed, len(below), mode=payload.mode)):
+            row.values = {**(row.values or {}), key: value}
 
     session.flush()
     session.expire(schedule, ["rows"])
+    hist.record_edit(
+        session, schedule, "fill", before,
+        summary=f"filled {len(below)} row(s)",
+    )
     return _grid(session, schedule, org)
+
+
+# ------------------------------------------------------------------ undo ---
+
+
+@router.post("/{schedule_id}/undo", response_model=GridOut)
+def undo_edit(
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Step back one recorded edit."""
+    try:
+        hist.undo(session, schedule)
+    except hist.UndoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/redo", response_model=GridOut)
+def redo_edit(
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Step forward again after an undo."""
+    try:
+        hist.redo(session, schedule)
+    except hist.UndoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _grid(session, schedule, org)
+
+
+# ----------------------------------------------------------------- notes ---
+
+
+def _notes_payload(session: Session, schedule: Schedule, org: Organisation) -> dict[str, object]:
+    house = svc.house_standard_for(session, org.id)
+    stype = columns_for(schedule)
+    return notes_svc.notes_view(schedule, stype, house)
+
+
+@router.get("/{schedule_id}/notes")
+def read_notes(
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """The notes that print here, each layer of them, and what they resolve to."""
+    return _notes_payload(session, schedule, org)
+
+
+@router.put("/{schedule_id}/notes")
+def write_notes(
+    payload: ScheduleNotesIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Give this schedule its own notes, or hand it back to the layers.
+
+    ``notes: null`` reverts. It is the only way back, and it is deliberately the
+    same shape as never having diverged, so there is no third state to reason
+    about.
+    """
+    notes_svc.set_schedule_notes(schedule, payload.notes)
+    session.flush()
+    return _notes_payload(session, schedule, org)
+
+
+@router.post("/{schedule_id}/notes/customise")
+def customise_notes(
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Take the notes over, starting from what they say now.
+
+    Diverging starts from the resolved wording rather than from nothing: the
+    point is almost always to change one line.
+    """
+    house = svc.house_standard_for(session, org.id)
+    stype = columns_for(schedule)
+    if schedule.notes is None:
+        schedule.notes = notes_svc.starting_point(schedule, stype, house)
+        session.flush()
+    return _notes_payload(session, schedule, org)
 
 
 # -------------------------------------------------------------- revisions ---

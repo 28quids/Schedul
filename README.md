@@ -55,19 +55,44 @@ workbook is ordinary Excel and prints to PDF from Excel.
 backend/schedul/
   core/       the domain. No web, no database, no UI — enforced by a test
     formula.py    the house formula language: one parser, two backends
-    catalogue.py  schedule types and the three column kinds
+    catalogue.py  schedule types, the three column kinds, and what a change to
+                  them would break
     naming.py     scoped tokens -> document number
     numbering.py  allocation and the renumber operations
     revisions.py  which revision is current
+    notes.py      organisation -> project -> type -> schedule, and where each
+                  line came from
+    tabular.py    reading a pasted block, and planning what pasting it would do
+    branding.py   what a practice's documents look like and which fields they carry
     house.py      everything that varies between practices
   db/         SQLAlchemy models. Organisation is the tenant boundary
+              upgrade.py adds columns an older database is missing, additively
   services/   transactions and lookups; every rule delegates to core
+              history.py  undo and redo for the grid's risky operations
+              importing.py a supplier's product list, planned before it is applied
+              impact.py   why a schedule says something different from last week
   export/     the vendored sheet construction, and PDF via LibreOffice
   api/        FastAPI over the services
 frontend/     no build step: ES modules served by the backend
+  js/grid/    the selection model, keyboard rules and block-paste planner, with
+              no DOM in them, so they can be tested
+  tests/      those tests, run under Node from pytest
 vendor/       the v1 toolkit this replaces, kept for reference and as test fixtures
 docs/         SPEC.md (the original brief) and DECISIONS.md (what changed, and why)
 ```
+
+### The grid
+
+One active cell and a rectangle around it, as a spreadsheet has: drag or
+Shift+Arrow to extend the selection, Ctrl+C and Ctrl+V for a block, Delete to
+clear one, Ctrl+D to fill down, Ctrl+Z to undo. Undo covers the operations that
+rewrite several rows at once — paste, delete, duplicate, fill — and is a restore
+from a recorded state rather than an inverse operation worked out per action.
+
+Pasting is planned before it happens. The preview says how many rows were found,
+whether the first line was a header, and what would be appended, inserted or
+removed; replacing every row is refused unless it is confirmed, and only when
+there is something to lose.
 
 ### The three column kinds
 
@@ -80,9 +105,30 @@ value comes from:
 | `library` | looked up from the shared equipment library | green |
 | `derived` | calculated by formula, read-only | black |
 
-That is the same colour contract the printed schedule uses, so the screen and
-the paper mean the same thing. It also maps onto COBie/IFC Component vs Type
-data, which is what keeps an IFC or COBie export possible later.
+That is the same colour contract the printed schedule uses while a schedule is
+being filled in. It also maps onto COBie/IFC Component vs Type data, which is
+what keeps an IFC or COBie export possible later.
+
+An **export** drops it. A file that leaves the office is read, not filled in, so
+`export.xlsx` and the PDF both default to a neutral print theme;
+`?theme=editor` gives the working colours back. The two hold identical values.
+
+### Notes
+
+Notes come from four places, printed general to specific: the practice's
+standing wording, what the project adds, what the equipment type says, and — only
+when it has to — what one schedule says instead. A schedule that takes its notes
+over replaces the inherited set rather than adding to it, and reverting drops
+its own copy.
+
+### Branding
+
+Organisation-level: a logo, a font from a list every machine has, a palette, and
+which fields the cover and revision page show and in what order. Configuration
+rather than a document designer — the hand-made branded originals contain
+drawing objects that cannot be round-tripped, so what is offered is what the
+renderer can carry out honestly. A field the workbook reads by formula cannot be
+hidden.
 
 ### One formula, two engines
 
@@ -105,7 +151,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-250 tests. The ones worth knowing about:
+510 tests. The ones worth knowing about:
 
 - **`test_formula.py`** — Excel's semantics where they differ from Python's,
   including `-2^2 = 4`, and that emitted Excel re-parses to the same value.
@@ -118,8 +164,16 @@ pytest
   Excel computes must be the same number.
 - **`test_architecture.py`** — walks the AST of every module in `core/` and fails
   if one imports the web, database or UI layer.
+- **`test_history.py`** — undo restores exactly, including a row's own id.
+- **`test_tabular.py`** — every count a paste preview reports, since each one is
+  something a user is about to confirm on our word.
+- **`test_branding.py`** — a field the workbook reads cannot be hidden, and the
+  issue theme and the editor theme hold the same numbers.
+- **`test_frontend.py`** — runs the grid's selection and keyboard rules under
+  Node. Skips itself when Node is not installed.
 
-Tests needing LibreOffice skip themselves when it is not installed.
+Tests needing LibreOffice skip themselves when it is not installed, as do the
+front-end ones when Node is not.
 
 ---
 

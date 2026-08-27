@@ -45,10 +45,12 @@ __all__ = [
     "Building",
     "Schedule",
     "ScheduleRow",
+    "ScheduleEdit",
     "RevisionRow",
     "Equipment",
     "EquipmentFlag",
     "EquipmentChange",
+    "ChangeEvent",
 ]
 
 
@@ -184,6 +186,10 @@ class Project(TimestampMixin, Base):
     #: code. Additions only -- a project cannot remove or reorder base columns,
     #: or two projects' schedules of the same type stop being comparable.
     type_extras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: Notes this job adds under the organisation's own, on every schedule in it.
+    #: The middle layer of core.notes' organisation -> project -> type -> schedule
+    #: resolution. Empty means the project adds nothing, which is the usual case.
+    notes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
     organisation: Mapped[Organisation] = relationship(back_populates="projects")
     buildings: Mapped[list["Building"]] = relationship(
@@ -303,6 +309,12 @@ class Schedule(TimestampMixin, Base):
     #: creation. Denormalised so numbering can scope to it and so changing a
     #: type's volume later cannot silently re-file an existing schedule.
     volume: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    #: This schedule's own notes, or None to inherit the resolved layers above.
+    #:
+    #: Null rather than an empty list on purpose: "inherit" and "deliberately no
+    #: notes at all" are different answers, and reverting to the project default
+    #: has to be able to say the first one.
+    notes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     #: '' while live; the schedule's own id once archived. See __table_args__.
     deleted_marker: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     archived_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
@@ -351,6 +363,43 @@ class ScheduleRow(TimestampMixin, Base):
     overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     schedule: Mapped[Schedule] = relationship(back_populates="rows")
+
+
+class ScheduleEdit(Base):
+    """One undoable edit to a schedule's rows.
+
+    The risky grid operations -- paste, delete, duplicate, fill, a bulk override
+    change -- rewrite several rows at once, and until now the only way back was
+    retyping. Each records the rows before and after it, so undo is a restore
+    rather than an inverse operation that has to be derived per action.
+
+    Storing the whole row set is deliberate. A schedule is tens of rows of small
+    JSON, so a snapshot costs almost nothing, and an inverse-operation journal
+    would have to be right for every action separately -- which is exactly the
+    kind of thing that is subtly wrong for one action and loses somebody's work.
+    """
+
+    __tablename__ = "schedule_edit"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    schedule_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Position in this schedule's undo stack. Recorded in Python because
+    #: SQLite's clock ties when two edits land in the same second.
+    seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    at: Mapped[_dt.datetime] = mapped_column(
+        DateTime,
+        default=lambda: _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
+        nullable=False,
+    )
+    #: paste | delete_rows | duplicate_row | fill | cells | add_row
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    before: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    after: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    #: True once undone. A new edit discards these, as a spreadsheet does.
+    undone: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class RevisionRow(TimestampMixin, Base):
@@ -496,3 +545,44 @@ class EquipmentFlag(TimestampMixin, Base):
     resolved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     equipment: Mapped[Equipment] = relationship(back_populates="flags")
+
+
+# ----------------------------------------------------------- change log ---
+
+
+class ChangeEvent(Base):
+    """One organisation-level change worth telling everybody about.
+
+    A schedule can change under somebody without them touching it: a column was
+    added to its type, the house notes were reworded, the branding moved. Each
+    of those is already recorded somewhere -- a type's own history, the library
+    change log -- but only in the place that caused it, which is not where the
+    person affected is looking. This is the shared spine the impact log reads,
+    and the only home for the changes that had none.
+
+    ``detail`` stays free-form JSON: an impact entry is something to show a
+    person, not something another query joins against.
+    """
+
+    __tablename__ = "change_event"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    organisation_id: Mapped[str] = mapped_column(
+        ForeignKey("organisation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Recorded in Python: SQLite's now() ties when two changes land in one second.
+    at: Mapped[_dt.datetime] = mapped_column(
+        DateTime,
+        default=lambda: _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
+        nullable=False,
+        index=True,
+    )
+    #: type | notes | branding | export | library | numbering
+    area: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    #: The thing that changed, e.g. a type code, so the log can be filtered.
+    subject: Mapped[str] = mapped_column(String(120), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    #: 'info' for a presentational change, 'warn' when schedules may move.
+    severity: Mapped[str] = mapped_column(String(10), default="info")
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), default="")

@@ -11,6 +11,7 @@ import {
   button, card, clear, confirmDialog, el, empty, fail, field, formatDate, input,
   modal, mount, notice, pill, select, show, table, toast,
 } from '../ui.js';
+import { importProducts, productGrid } from './library-entry.js';
 
 const TONE = { CONFLICT: 'red', DRIFT: 'amber', INCOMPLETE: 'quiet', NEW: 'blue' };
 
@@ -92,6 +93,20 @@ async function drawBrowse(root, types) {
             class: 'btn btn-sm',
             on: { click: () => editEntry(entry, libColumns) },
           }),
+          button('Add variants', {
+            class: 'btn btn-sm',
+            title: 'Start a batch from this product, keeping its common fields',
+            on: {
+              click: async () => {
+                const key = (c) => (c.unit ? `${c.name} (${c.unit})` : c.name);
+                const seed = {
+                  'Model Reference': entry.model_reference,
+                  ...Object.fromEntries(libColumns.map((c) => [key(c), entry.values[key(c)] ?? ''])),
+                };
+                if (await productGrid(state.code, libColumns, { seed: [seed] })) libraryView();
+              },
+            },
+          }),
           button('Remove', {
             class: 'btn btn-sm btn-danger',
             on: {
@@ -124,10 +139,25 @@ async function drawBrowse(root, types) {
         el('div', { style: 'min-width:240px' }, [typeSelect]),
         el('div', { style: 'flex:1;min-width:200px' }, [search]),
       ]),
-      button('Add product', {
-        class: 'btn btn-primary',
-        on: { click: () => addEntry(libColumns) },
-      }),
+      el('div', { class: 'btn-row' }, [
+        button('Import…', {
+          title: 'Paste a supplier’s product list, map the columns, and see what it would do',
+          on: {
+            click: async () => {
+              if (await importProducts(state.code)) libraryView();
+            },
+          },
+        }),
+        button('Add products', {
+          class: 'btn btn-primary',
+          title: 'A table to type several products into at once',
+          on: {
+            click: async () => {
+              if (await productGrid(state.code, libColumns)) libraryView();
+            },
+          },
+        }),
+      ]),
     ]),
     el('div', { class: 'card-body tight' }, [
       entries.length
@@ -145,44 +175,6 @@ async function drawBrowse(root, types) {
           ),
     ]),
   ]));
-}
-
-async function addEntry(libColumns) {
-  const reference = input('', { placeholder: 'SYS-VSR-500' });
-  const inputs = {};
-  for (const c of libColumns) {
-    inputs[c.unit ? `${c.name} (${c.unit})` : c.name] = input('');
-  }
-
-  const ok = await modal({
-    title: `Add a ${state.code} product`,
-    wide: true,
-    render: () => el('div', {}, [
-      field('Model reference', reference, 'The lookup key. It is what a schedule row points at.'),
-      el('div', { class: 'grid-3', style: 'margin-top:14px' },
-        libColumns.map((c) => field(
-          c.unit ? `${c.name} (${c.unit})` : c.name,
-          inputs[c.unit ? `${c.name} (${c.unit})` : c.name]
-        ))),
-    ]),
-    actions: (close) => [
-      button('Cancel', { on: { click: () => close(false) } }),
-      button('Save', { class: 'btn btn-primary', on: { click: () => close(true) } }),
-    ],
-  });
-  if (!ok || !reference.value.trim()) return;
-
-  try {
-    await api.library.save({
-      type_code: state.code,
-      model_reference: reference.value.trim(),
-      values: Object.fromEntries(
-        Object.entries(inputs).map(([k, n]) => [k, n.value]).filter(([, v]) => v !== '')
-      ),
-    });
-    toast('Saved to the library', 'ok');
-    libraryView();
-  } catch (error) { fail(error); }
 }
 
 async function editEntry(entry, libColumns) {

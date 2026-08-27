@@ -388,10 +388,30 @@ class TestGridOperations:
     def test_paste_replace_is_the_only_destructive_mode(self, client, schedule):
         self.add(client, schedule, **{"Unit Reference": "OLD"})
         grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={
-            "mode": "replace",
+            "mode": "replace", "confirm": True,
             "rows": [{"values": {"Unit Reference": "NEW"}}],
         }).json()
         assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["NEW"]
+
+    def test_replace_is_refused_until_it_is_confirmed(self, client, schedule):
+        self.add(client, schedule, **{"Unit Reference": "OLD"})
+        response = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "replace",
+            "rows": [{"values": {"Unit Reference": "NEW"}}],
+        })
+        assert response.status_code == 409
+        assert "1 row(s) that have been filled in" in response.json()["detail"]
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert [r["values"]["Unit Reference"] for r in grid["rows"]] == ["OLD"], (
+            "a refused replace must leave the schedule exactly as it was"
+        )
+
+    def test_replacing_an_empty_schedule_needs_no_confirmation(self, client, schedule):
+        response = client.post(f"/api/schedules/{schedule}/rows/paste", json={
+            "mode": "replace",
+            "rows": [{"values": {"Unit Reference": "NEW"}}],
+        })
+        assert response.status_code == 200, "there was nothing to lose"
 
     def test_pasted_numbers_are_still_coerced(self, client, schedule):
         grid = client.post(f"/api/schedules/{schedule}/rows/paste", json={

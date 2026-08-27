@@ -6,6 +6,9 @@
   --blue: #009df0;          /* house title blue */
   --blue-dark: #0077b6;
   --blue-wash: #e8f6fe;
+  /* Translucent so a selected cell keeps its own colour underneath: an input
+     stays yellow, a calculated cell stays white, and both read as selected. */
+  --sel-wash: rgba(0, 157, 240, .14);
   --grey-900: #1c2128;
   --grey-800: #2d333b;
   --grey-700: #444c56;
@@ -411,6 +414,30 @@ td.cell-input .with-flag input { flex: 1; min-width: 0; }
 
 td.cell-selected input { box-shadow: inset 0 0 0 2px var(--blue); }
 .sheet-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.toolbar-gap { width: 10px; }
+
+/* ------------------------------------------------------------ selection --- */
+
+/* A rectangular selection, as a spreadsheet has. The wash sits under the cell's
+   own colour so an input stays yellow and a calculated cell stays white while
+   both read as selected; the focus ring marks the one active cell. */
+table.sheet.selectable { user-select: none; }
+table.sheet.selectable td.cell-input input { user-select: text; }
+table.sheet td.sel { background-image: linear-gradient(var(--sel-wash), var(--sel-wash)); }
+table.sheet td.sel input { background-image: linear-gradient(var(--sel-wash), var(--sel-wash)); }
+table.sheet td.sel-focus { box-shadow: inset 0 0 0 2px var(--blue); }
+table.sheet td.sel-focus:focus { outline: none; }
+table.sheet tr.row-selected td.rowno { background: var(--blue-wash); color: var(--blue-dark); }
+
+/* Where a value comes from, on the cell rather than in a legend. */
+td.cell-source-library::after {
+  content: ''; position: absolute; left: 3px; top: 50%; width: 4px; height: 4px;
+  margin-top: -2px; border-radius: 50%; background: var(--library-text); opacity: .45;
+}
+td.cell-source-library { padding-left: 12px !important; }
+
+.paste-summary { margin-top: 12px; }
+.paste-summary table { font-size: 11.5px; }
 .sheet-hint { font-size: 11.5px; color: var(--grey-600); }
 .saving { font-size: 11.5px; color: var(--grey-600); }
 .saving.err { color: var(--red); font-weight: 600; }
@@ -427,12 +454,171 @@ td.cell-library:hover .cell-override { visibility: visible; }
 .cell-reset { color: var(--blue-dark); font-weight: 400; }
 td.cell-library { position: relative; }
 
-/* Drag the right edge of a preview column to set its width.
-   Scoped to the preview: a blanket `th { position: relative }` would override
-   the sticky positioning that keeps table headers in view everywhere else. */
-#designer-preview table.sheet thead th { position: relative; }
-#designer-preview .col-resize {
+/* --------------------------------------------------- the type designer --- */
+
+/* The designer's table is the editor: names are typed in the header, widths are
+   dragged on the edge, columns are dragged to move. Scoped to this table — a
+   blanket `th { position: relative }` would override the sticky positioning
+   that keeps table headers in view everywhere else. */
+/* Not sticky here. The designer's table is short and the page scrolls behind
+   it, so a stuck header would ride down over the example row. */
+table.designer-sheet thead th {
+  position: relative; vertical-align: top; padding: 6px 7px; top: auto;
+}
+table.designer-sheet thead th.auto-column { opacity: .75; }
+.col-head { display: flex; align-items: center; gap: 3px; }
+.col-grip { cursor: grab; color: var(--grey-400); font-size: 11px; user-select: none; }
+.col-grip:active { cursor: grabbing; }
+input.col-name {
+  border: 1px solid transparent; background: transparent; font: inherit; font-weight: 600;
+  color: var(--grey-800); padding: 2px 3px; width: 100%; min-width: 0; border-radius: 3px;
+}
+input.col-name:hover { border-color: var(--grey-300); background: var(--white); }
+input.col-name:focus { border-color: var(--blue); background: var(--white); outline: none; }
+.col-name-fixed { font-weight: 600; color: var(--grey-600); font-style: italic; }
+select.col-kind {
+  font-size: 10.5px; padding: 1px 4px; height: auto; margin-top: 3px;
+  border-color: var(--grey-300); background: var(--white); width: 100%;
+}
+.col-more { opacity: 0; font-size: 12px; }
+table.designer-sheet th:hover .col-more { opacity: 1; }
+th.col-selected { box-shadow: inset 0 0 0 2px var(--blue); }
+
+.col-resize {
   position: absolute; top: 0; right: -3px; width: 9px; height: 100%;
   cursor: col-resize; background: transparent; z-index: 5;
 }
-#designer-preview .col-resize:hover { background: var(--blue); opacity: .5; }
+.col-resize:hover { background: var(--blue); opacity: .5; }
+
+.col-insert {
+  position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; line-height: 14px; text-align: center; padding: 0;
+  border: 1px solid var(--grey-300); border-radius: 50%; background: var(--white);
+  color: var(--blue-dark); cursor: pointer; font-size: 11px; opacity: 0; z-index: 6;
+}
+table.designer-sheet th:hover .col-insert { opacity: 1; }
+.col-insert:hover { background: var(--blue-wash); border-color: var(--blue); }
+
+table.designer-sheet th.dragging { opacity: .45; }
+table.designer-sheet th.drop-before { box-shadow: inset 3px 0 0 var(--blue); }
+table.designer-sheet th.drop-after { box-shadow: inset -3px 0 0 var(--blue); }
+
+/* ---------------------------------------------------------------- drawer --- */
+
+/* Advanced settings for one column. A drawer rather than more table: these are
+   settings on a column, and putting them in the grid made the old screen a
+   spreadsheet of a spreadsheet. */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 330px; z-index: 250;
+  background: var(--white); border-left: 1px solid var(--grey-300);
+  box-shadow: -6px 0 24px rgba(0, 0, 0, .08); display: flex; flex-direction: column;
+}
+.drawer-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--grey-200);
+}
+.drawer-body { padding: 14px; overflow: auto; }
+.drawer-body .field { margin-bottom: 12px; }
+.checks { display: flex; flex-direction: column; gap: 4px; }
+label.check { display: flex; gap: 6px; align-items: center; }
+.inherited-notes { margin-bottom: 8px; }
+tr.detail-row > td { background: var(--grey-50); padding: 8px 12px; }
+
+/* ----------------------------------------------------------------- notes --- */
+
+.note-list { padding-left: 20px; font-size: 12.5px; line-height: 1.7; margin: 0; }
+.note-list li { margin-bottom: 4px; }
+.note-list .note-text { margin-right: 8px; }
+.note-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.note-row textarea { flex: 1; }
+.note-row .muted { padding-top: 7px; }
+
+.layer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.layer-panel {
+  border: 1px solid var(--grey-200); border-radius: var(--radius); padding: 10px 12px;
+  background: var(--grey-50);
+}
+.layer-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.layer-panel .note-list { padding-left: 16px; margin-top: 6px; }
+
+/* -------------------------------------------------------------- branding --- */
+
+.colour-field { display: flex; gap: 6px; align-items: center; }
+.colour-field input[type="color"] {
+  width: 34px; height: 30px; padding: 2px; border: 1px solid var(--grey-300);
+  border-radius: var(--radius); background: var(--white); cursor: pointer;
+}
+.colour-field input[type="text"] { flex: 1; min-width: 0; }
+.logo-thumb {
+  max-height: 56px; max-width: 200px; border: 1px solid var(--grey-200);
+  border-radius: var(--radius); padding: 4px; background: var(--white);
+  vertical-align: middle; margin-right: 8px;
+}
+
+.field-chooser { display: flex; flex-direction: column; gap: 2px; }
+.chooser-row {
+  display: flex; gap: 8px; align-items: center; padding: 5px 8px;
+  border: 1px solid transparent; border-radius: var(--radius); font-size: 12.5px;
+}
+.chooser-row:hover { background: var(--grey-50); border-color: var(--grey-200); }
+.chooser-row[draggable="true"] { cursor: grab; }
+.chooser-row.dragging { opacity: .45; }
+.chooser-row.fixed { color: var(--grey-600); }
+.fixed-mark { color: var(--grey-400); font-size: 9px; width: 13px; text-align: center; }
+
+/* A faithful list of what the document would carry, not a mock-up of one:
+   the rows come from the same resolution the renderer uses. */
+.preview-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.doc-preview {
+  border: 1px solid var(--grey-300); border-radius: var(--radius); background: var(--white);
+  padding: 16px; margin-top: 6px; min-height: 220px;
+}
+.doc-logo { max-height: 48px; max-width: 160px; margin-bottom: 12px; display: block; }
+.doc-fields { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.doc-label { font-size: 10px; font-weight: 700; color: var(--grey-700); }
+.doc-value { font-size: 11px; color: var(--grey-500); }
+.doc-title { font-weight: 700; line-height: 1.25; }
+.doc-sub { font-size: 12px; color: var(--grey-700); margin-top: 6px; }
+.doc-footer { font-size: 10px; color: var(--grey-500); margin-top: 18px; }
+.doc-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+.doc-table td { padding: 2px 4px; border-bottom: 1px solid var(--grey-100); }
+
+/* ------------------------------------------------------- library entry --- */
+
+.entry-grid { max-height: 340px; overflow: auto; }
+.entry-grid table { font-size: 12px; }
+.entry-grid th { vertical-align: top; }
+.entry-grid td.cell-input { padding: 0; }
+.entry-grid td.cell-input input {
+  border: none; border-radius: 0; background: var(--input-fill); color: var(--input-text);
+  font-size: 12px; padding: 4px 7px; width: 100%; font-family: inherit; min-width: 110px;
+}
+.entry-grid td.cell-input input:focus { box-shadow: inset 0 0 0 2px var(--blue); }
+.entry-grid td.rowno { background: var(--grey-50); color: var(--grey-500); text-align: center; }
+.lock-toggle { display: flex; gap: 4px; align-items: center; color: var(--grey-600); font-weight: 400; }
+
+.mapping-row { margin-top: 14px; }
+.mapping-controls {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;
+  margin-top: 6px;
+}
+.mapping-item { border: 1px solid var(--grey-200); border-radius: var(--radius); padding: 6px 8px; }
+.mapping-item select { margin-top: 4px; }
+
+/* ------------------------------------------------------------ navigation --- */
+
+.nav-project { display: block; line-height: 1.35; }
+.nav-sub {
+  display: block; font-size: 10.5px; color: var(--grey-500);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.nav-context { padding-bottom: 4px; }
+.nav-schedules { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 10px 2px; }
+.nav-schedule {
+  padding: 2px 7px; font-size: 11px; border-radius: 10px; background: rgba(255, 255, 255, .08);
+}
+.nav-schedule.active { background: var(--blue); color: var(--white); }
+.nav-sub-item { font-size: 11.5px; opacity: .85; }
+
+.room-block { margin-bottom: 16px; }
+.room-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }

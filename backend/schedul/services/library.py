@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..core.catalogue import ScheduleType
 from ..db.models import Equipment, EquipmentChange, EquipmentFlag
+from .grid import coerce
 
 __all__ = [
     "DRIFT_RATIO",
@@ -188,8 +189,14 @@ def save_equipment(
 
     # Only the type's library columns belong in the library; input and derived
     # values are per-unit or calculated and would be stale the moment they land.
+    #
+    # A duty typed into a web form or pasted out of a supplier's sheet arrives as
+    # text. Stored as text it reaches the exported workbook as text: left-aligned,
+    # ignored by SUM, and awkward in any formula an engineer adds later. The same
+    # coercion the grid uses is applied here, so a number is a number wherever it
+    # came in.
     allowed = {c.legacy_name for c in schedule_type.library}
-    cleaned = {k: v for k, v in values.items() if k in allowed}
+    cleaned = {k: coerce(v) for k, v in values.items() if k in allowed}
 
     entry = session.scalar(
         select(Equipment).where(

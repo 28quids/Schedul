@@ -45,6 +45,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+from ..core.branding import Branding
 from ..core.catalogue import MODEL_REFERENCE, ScheduleType
 from ..core.formula import CONSTANTS, FormulaError, to_excel
 from ..core.house import HouseStandard
@@ -93,6 +94,40 @@ class _Style:
         self.f_sm = Font(name=sf, size=8)
 
 
+#: Roughly how many characters of an 11pt font fit in one unit of column width.
+#: Excel measures a column in characters of the standard font, so a title at
+#: another size scales inversely.
+_CHARS_PER_UNIT = 11.0
+
+
+def _fit_title(text: str, chars_available: float, wanted: int, max_lines: int = 2):
+    """A point size and line count that fit ``text`` across the merged title.
+
+    The house cover sets the project name and the schedule title at 30pt across
+    seven columns. That is fine for 'Fan Coil Unit Schedule' and runs clean off
+    the page for 'Mechanical Ventilation with Heat Recovery Unit Schedule',
+    which is what was happening: the text was clipped at the right margin and
+    overlapped the line below it.
+
+    So it wraps first, up to two lines, and only shrinks when even that will not
+    fit. The practice's chosen size is the maximum rather than the mandate,
+    because a title that has been silently cut in half is worse than one set a
+    few points smaller.
+    """
+    import math
+
+    text = str(text or "")
+    size = max(int(wanted), 8)
+    while size > 10:
+        per_line = max(1, int(chars_available * _CHARS_PER_UNIT / size))
+        lines = max(1, math.ceil(len(text) / per_line))
+        if lines <= max_lines:
+            return size, lines
+        size -= 1
+    per_line = max(1, int(chars_available * _CHARS_PER_UNIT / size))
+    return size, max(1, math.ceil(len(text) / per_line))
+
+
 def _page(ws, landscape: bool) -> None:
     ws.page_setup.orientation = "landscape" if landscape else "portrait"
     ws.page_setup.paperSize = A4
@@ -128,6 +163,7 @@ class ScheduleContent:
         doc_type: str = "SC",
         classification: str = "",
         theme: str = "xlsx",
+        notes: Sequence[str] | None = None,
     ) -> None:
         self.schedule_type = schedule_type
         self.house = house
@@ -152,11 +188,20 @@ class ScheduleContent:
         self.products = list(products)
         self.doc_type = doc_type
         self.classification = classification
+        #: The resolved notes, already layered by core.notes. None falls back to
+        #: the organisation's plus the type's, which is what they resolve to for
+        #: a schedule that has not diverged.
+        self.notes = list(notes) if notes is not None else None
 
     @property
     def issue_theme(self) -> bool:
-        """Whether to render plainly, as an issued document rather than a form."""
-        return self.theme == "pdf"
+        """Whether to render plainly, as an issued document rather than a form.
+
+        'issue' and 'pdf' both mean a document that is being sent to somebody.
+        'editor' keeps the yellow input fill and the blue/green/black contract,
+        which are editing aids and belong on a file somebody is still filling in.
+        """
+        return self.theme in ("pdf", "issue")
 
     def overrides_for(self, index: int) -> dict[str, Any]:
         return self.overrides[index] if index < len(self.overrides) else {}
@@ -165,8 +210,19 @@ class ScheduleContent:
         return self.computed[index] if index < len(self.computed) else {}
 
     @property
-    def branding(self) -> dict[str, Any]:
-        return self.house.branding or {}
+    def branding(self) -> Branding:
+        """The practice's document appearance, as the renderer's instructions."""
+        return Branding.from_dict(self.house.branding)
+
+    @property
+    def house_style(self) -> dict[str, Any]:
+        """The house style with branding's fonts and colours applied over it.
+
+        Branding is an overlay rather than a second copy: the house style also
+        holds row counts and body sizes that have nothing to do with branding,
+        and two places holding the cover font would eventually disagree.
+        """
+        return {**self.house.house_style, **self.branding.house_style_overrides()}
 
     @property
     def building_label(self) -> str:
@@ -181,8 +237,16 @@ def _notes_block(content: ScheduleContent) -> str:
     SPEC.md 4.7 and 1a.1: the real house file's A2 is equipment-specific
     ("radiant panels are to be sized with a 55degC flow"), while v1 put the same
     project-level block on every schedule. Both belong, in that order.
+
+    Which notes those are is resolved by ``core.notes`` before it gets here --
+    organisation, then project, then type, unless the schedule has taken them
+    over -- so the workbook prints exactly what the editor showed.
     """
-    combined = [*content.house.general_notes, *content.schedule_type.notes]
+    combined = (
+        content.notes
+        if content.notes is not None
+        else [*content.house.general_notes, *content.schedule_type.notes]
+    )
     if not combined:
         return ""
     numbered = "\n".join(f"[{i}] {n}" for i, n in enumerate(combined, start=1))
@@ -191,18 +255,20 @@ def _notes_block(content: ScheduleContent) -> str:
 
 def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     """Write one schedule workbook and return where it landed."""
-    st = _Style(content.house.house_style)
-    hs = content.house.house_style
+    hs = content.house_style
+    st = _Style(hs)
+    brand = content.branding
     stype = content.schedule_type
 
     # An issued document is read, not filled in. The yellow input fill and the
     # blue/green/black colour contract are editing aids; carrying them onto a
     # PDF that goes to a client makes it look like a working file.
     issue = content.issue_theme
+    header_fill = PatternFill("solid", fgColor=brand.rgb("header"))
     fill_in = PatternFill("solid", fgColor="FFFFFF") if issue else FILL_IN
-    grp_in = FILL_HDR if issue else FILL_GRP_IN
-    grp_lib = FILL_HDR if issue else FILL_GRP_LIB
-    grp_calc = FILL_HDR if issue else FILL_GRP_CALC
+    grp_in = header_fill if issue else FILL_GRP_IN
+    grp_lib = header_fill if issue else FILL_GRP_LIB
+    grp_calc = header_fill if issue else FILL_GRP_CALC
     font_in = st.f_sm if issue else st.f_in
     font_pull = st.f_sm if issue else st.f_pull
 
@@ -210,8 +276,16 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     library = stype.library
     derived = stype.derived
 
-    data_rows = max(int(hs.get("data_rows", 40)), len(content.rows) + 5)
-    rev_rows = max(int(hs.get("revision_rows", 20)), len(content.revisions) + 5)
+    # A working file carries the house standard's spare rows, because somebody is
+    # about to fill them in. An issued one carries what it says: forty ruled
+    # empty rows under six units reads as an unfinished document, and takes
+    # pages of a PDF to say nothing.
+    if issue:
+        data_rows = max(len(content.rows), 1)
+        rev_rows = max(len(content.revisions), 1)
+    else:
+        data_rows = max(int(hs.get("data_rows", 40)), len(content.rows) + 5)
+        rev_rows = max(int(hs.get("revision_rows", 20)), len(content.revisions) + 5)
 
     n_inputs = len(inputs)
     mr_col = n_inputs + 1
@@ -326,16 +400,24 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     for col, w in zip("ABCDEFG", [16, 34, 12, 13, 13, 13, 48]):
         rv.column_dimensions[col].width = w
 
+    # The title block, sized to the width it actually has. See _fit_title.
+    rv_width = sum(rv.column_dimensions[c].width for c in "ABCDEFG")
+    rv_size, rv_lines = _fit_title(stype.title, rv_width, hs["title_size"])
+
     rv.merge_cells("A3:G3")
     rv["A3"] = f"=Config!$B${conf_rows['Project Name']}"
-    rv["A3"].font = st.f_big_grey
-    rv["A3"].alignment = LFT
+    rv["A3"].font = Font(
+        name=hs["cover_font"], size=rv_size, bold=True, color=st.grey
+    )
+    rv["A3"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
     rv.merge_cells("A4:G4")
     rv["A4"] = stype.title.upper()
-    rv["A4"].font = st.f_big_blue
-    rv["A4"].alignment = LFT
-    rv.row_dimensions[3].height = 40
-    rv.row_dimensions[4].height = 40
+    rv["A4"].font = Font(
+        name=hs["cover_font"], size=rv_size, bold=True, color=st.blue
+    )
+    rv["A4"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    rv.row_dimensions[3].height = max(40, rv_size * 1.45)
+    rv.row_dimensions[4].height = max(40, rv_size * 1.45 * rv_lines)
 
     # The summary block starts at row 10 and its length is not fixed: adding a
     # field costs one entry in this list, and nothing downstream hardcodes a row.
@@ -366,53 +448,71 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
 
     status_expr = latest("B", blank_zero=False)
 
-    summary: list[tuple[str, Any, str | None]] = [
-        ("Project Name", f"=Config!$B${conf_rows['Project Name']}", None),
-        ("Project no.", f"=Config!$B${conf_rows['Project Number']}", None),
-        ("Building", f"=Config!$B${conf_rows['Building']}", None),
-        ("Recipient", f"=Config!$B${conf_rows['Client']}", None),
-        ("Document type", content.doc_type, None),
-        ("Revision", f'=IFERROR({latest("A")},"")', None),
-        ("Date", f'=IFERROR({latest("C")},"")', "DD/MM/YYYY"),
-        ("Prepared by", f'=IFERROR({latest("D")},"")', None),
-        ("Checked by", f'=IFERROR({latest("E")},"")', None),
-        ("Approved by", f'=IFERROR({latest("F")},"")', None),
-        ("Document no", f"=Config!$B${conf_rows['DocumentNumber']}", None),
-        (
-            "Suitability Status",
-            f'=IFERROR(LEFT({status_expr},FIND(" -",{status_expr})-1),"")',
-            None,
+    # Every row the summary block can carry, keyed the way core.branding names
+    # them. Which of these are written, and in what order, is the practice's
+    # decision -- but the ones the cover and the Metadata sheet read by formula
+    # are marked as not optional there and cannot be dropped, so a configured
+    # document can never come out with a broken reference in it.
+    summary_values: dict[str, tuple[Any, str | None]] = {
+        "project_name": (f"=Config!$B${conf_rows['Project Name']}", None),
+        "project_number": (f"=Config!$B${conf_rows['Project Number']}", None),
+        "building": (f"=Config!$B${conf_rows['Building']}", None),
+        "recipient": (f"=Config!$B${conf_rows['Client']}", None),
+        "document_type": (content.doc_type, None),
+        "revision": (f'=IFERROR({latest("A")},"")', None),
+        "date": (f'=IFERROR({latest("C")},"")', "DD/MM/YYYY"),
+        "prepared_by": (f'=IFERROR({latest("D")},"")', None),
+        "checked_by": (f'=IFERROR({latest("E")},"")', None),
+        "approved_by": (f'=IFERROR({latest("F")},"")', None),
+        "document_number": (f"=Config!$B${conf_rows['DocumentNumber']}", None),
+        "status": (
+            f'=IFERROR(LEFT({status_expr},FIND(" -",{status_expr})-1),"")', None,
         ),
-        (
-            "Suitability Description",
-            f'=IFERROR(MID({status_expr},FIND("- ",{status_expr})+2,200),"")',
-            None,
+        "status_description": (
+            f'=IFERROR(MID({status_expr},FIND("- ",{status_expr})+2,200),"")', None,
         ),
-        ("Schedule name", stype.title, None),
-    ]
+        "schedule_name": (stype.title, None),
+        "classification": (content.classification, None),
+        "bsuid": ("", None),
+        "trigger_events": ("", None),
+    }
 
+    layout_fields = brand.revision_layout()
     summary_rows: dict[str, int] = {}
-    for offset, (label, value, fmt) in enumerate(summary):
+    for offset, field_spec in enumerate(layout_fields):
         r = SUMMARY_TOP + offset
-        summary_rows[label] = r
-        rv.cell(r, 1, label).font = st.f_cov_lbl
+        summary_rows[field_spec.key] = r
+        value, fmt = summary_values.get(field_spec.key, ("", None))
+        rv.cell(r, 1, field_spec.label).font = st.f_cov_lbl
         c = rv.cell(r, 2, value)
         c.font = st.f_cov_val
         c.alignment = LFT
         if fmt:
             c.number_format = fmt
 
-    tail = SUMMARY_TOP + len(summary) + 1
-    rv.cell(tail, 1, "Delref Classification").font = st.f_cov_lbl
-    rv.cell(tail, 2, content.classification).font = st.f_cov_val
-    rv.cell(tail + 1, 1, "BSUID").font = st.f_cov_lbl
-    rv.cell(tail + 2, 1, "Trigger Events").font = st.f_cov_lbl
+    derived_last = SUMMARY_TOP + len(layout_fields) - 1
     rv.cell(
-        tail + 4, 1,
-        f"Rows {SUMMARY_TOP} to {SUMMARY_TOP + len(summary) - 1} derive from the "
+        derived_last + 3, 1,
+        f"Rows {SUMMARY_TOP} to {derived_last} derive from the "
         f"most recent revision below, ranked by series then number so a published "
         f"C-revision outranks every preliminary one. Do not type into them.",
-    ).font = Font(name="Verdana", size=8, italic=True, color="595959")
+    ).font = Font(name=hs["cover_font"], size=8, italic=True, color="595959")
+
+    def summary_ref(key: str) -> str:
+        """A reference to one summary row, for the cover and the Metadata sheet.
+
+        Only ever called for rows core.branding refuses to hide, so the lookup
+        cannot miss -- but if a future field is made optional and something
+        still reads it, this fails loudly here rather than writing #REF! into a
+        document somebody issues.
+        """
+        row = summary_rows.get(key)
+        if row is None:
+            raise KeyError(
+                f"the workbook reads the {key!r} row, so it cannot be hidden; "
+                f"mark it as not optional in core.branding"
+            )
+        return f"'Revision page'!B{row}"
 
     headers = [
         "Revision", "Status", "Date", "Prepared by", "Checked by",
@@ -485,54 +585,96 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
 
     # -------------------------------------------------------- Front Cover --
     fcv = wb.create_sheet("Front Cover")
+    # Ten columns of 11.5 characters is about 115mm, which leaves an A4 portrait
+    # page with sensible margins rather than a title block that runs off it.
     for i in range(1, 11):
         fcv.column_dimensions[get_column_letter(i)].width = 11.5
 
-    cover_pairs = [
-        (11, "Intended for", f"=Config!$B${conf_rows['Client']}"),
-        (14, "Date", f"='Revision page'!B{summary_rows['Date']}"),
-        (17, "Document number", f"='Revision page'!B{summary_rows['Document no']}"),
-        (
-            20,
-            "Revision",
-            f"='Revision page'!B{summary_rows['Revision']}&\"  \"&"
-            f"'Revision page'!B{summary_rows['Suitability Status']}",
+    # What each cover field says. Which of them appear, and in what order, is
+    # the practice's decision -- so the rows they land on are worked out from
+    # the layout rather than being numbered by hand.
+    cover_values: dict[str, tuple[Any, str | None]] = {
+        "recipient": (f"=Config!$B${conf_rows['Client']}", None),
+        "date": (f"={summary_ref('date')}", "DD/MM/YYYY"),
+        "document_number": (f"={summary_ref('document_number')}", None),
+        "revision": (
+            f"={summary_ref('revision')}&\"  \"&{summary_ref('status')}", None,
         ),
         # Who signed it off. The revision page already derives these from the
         # log; the cover is where a reader looks first.
-        (23, "Prepared by", f"='Revision page'!B{summary_rows['Prepared by']}"),
-        (26, "Checked by", f"='Revision page'!B{summary_rows['Checked by']}"),
-        (29, "Approved by", f"='Revision page'!B{summary_rows['Approved by']}"),
-    ]
-    for label_row, label, value in cover_pairs:
-        fcv.cell(label_row, 1, label).font = st.f_cov_sm
+        "prepared_by": (f"={summary_ref('prepared_by')}", None),
+        "checked_by": (f"={summary_ref('checked_by')}", None),
+        "approved_by": (f"={summary_ref('approved_by')}", None),
+        "building": (f"=Config!$B${conf_rows['Building']}", None),
+    }
+
+    COVER_TOP = 11
+    cover_layout = brand.cover_layout()
+    for offset, field_spec in enumerate(cover_layout):
+        value, fmt = cover_values.get(field_spec.key, ("", None))
+        label_row = COVER_TOP + offset * 3
+        fcv.cell(label_row, 1, field_spec.label).font = st.f_cov_sm
         cell = fcv.cell(label_row + 1, 1, value)
         cell.font = st.f_cov_sm
-        if label == "Date":
-            cell.number_format = "DD/MM/YYYY"
+        if fmt:
+            cell.number_format = fmt
 
-    fcv.merge_cells("A41:G41")
-    fcv["A41"] = f"=Config!$B${conf_rows['Project Name']}"
-    fcv["A41"].font = st.f_big_grey
-    fcv["A41"].alignment = LFT
-    fcv.merge_cells("A42:G42")
-    fcv["A42"] = stype.title.upper()
-    fcv["A42"].font = st.f_big_blue
-    fcv["A42"].alignment = LFT
-    fcv.row_dimensions[41].height = 40
-    fcv.row_dimensions[42].height = 40
+    # The title block sits below the fields, wherever they end, so hiding one
+    # tightens the page instead of leaving a hole in it.
+    title_row = max(41, COVER_TOP + len(cover_layout) * 3 + 2)
+    cover_width = sum(fcv.column_dimensions[get_column_letter(i)].width for i in range(1, 8))
+    title_size, title_lines = _fit_title(stype.title, cover_width, hs["title_size"])
+    wrapped = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    fcv.merge_cells(f"A{title_row}:G{title_row}")
+    fcv[f"A{title_row}"] = f"=Config!$B${conf_rows['Project Name']}"
+    fcv[f"A{title_row}"].font = Font(
+        name=hs["cover_font"], size=title_size, bold=True, color=st.grey
+    )
+    fcv[f"A{title_row}"].alignment = wrapped
+    fcv.merge_cells(f"A{title_row + 1}:G{title_row + 1}")
+    fcv[f"A{title_row + 1}"] = stype.title.upper()
+    fcv[f"A{title_row + 1}"].font = Font(
+        name=hs["cover_font"], size=title_size, bold=True, color=st.blue
+    )
+    fcv[f"A{title_row + 1}"].alignment = wrapped
+    # Room for the size that was actually used, and for a title that wrapped.
+    fcv.row_dimensions[title_row].height = max(40, title_size * 1.45)
+    fcv.row_dimensions[title_row + 1].height = max(40, title_size * 1.45 * title_lines)
+
+    cover_bottom = title_row + 1
 
     # The building, under the project name (SPEC.md 4.6). One stored copy on
     # Config; this and the Revision page both read it.
-    fcv.merge_cells("A43:G43")
-    fcv["A43"] = f"=Config!$B${conf_rows['Building']}"
-    fcv["A43"].font = st.f_cov_val
-    fcv["A43"].alignment = LFT
+    if any(f.key == "building" for f in cover_layout):
+        cover_bottom += 1
+        fcv.merge_cells(f"A{cover_bottom}:G{cover_bottom}")
+        fcv[f"A{cover_bottom}"] = f"=Config!$B${conf_rows['Building']}"
+        fcv[f"A{cover_bottom}"].font = st.f_cov_val
+        fcv[f"A{cover_bottom}"].alignment = LFT
+
+    if brand.cover_subtitle:
+        cover_bottom += 1
+        fcv.merge_cells(f"A{cover_bottom}:G{cover_bottom}")
+        fcv[f"A{cover_bottom}"] = brand.cover_subtitle
+        fcv[f"A{cover_bottom}"].font = st.f_cov_lbl
+        fcv[f"A{cover_bottom}"].alignment = LFT
+
+    if brand.cover_footer:
+        cover_bottom += 2
+        fcv.merge_cells(f"A{cover_bottom}:G{cover_bottom}")
+        fcv[f"A{cover_bottom}"] = brand.cover_footer
+        fcv[f"A{cover_bottom}"].font = Font(
+            name=hs["cover_font"], size=8, color="595959"
+        )
+        fcv[f"A{cover_bottom}"].alignment = LFT
 
     _apply_branding(fcv, content)
 
     _page(fcv, landscape=False)
-    fcv.print_area = "A1:G50"
+    # The print area follows the content: a fixed A1:G50 clipped a cover with a
+    # footer on it and left half a page of white on one without.
+    fcv.print_area = f"A1:G{max(50, cover_bottom + 2)}"
 
     # ---------------------------------------------------------- Schedule ---
     sc = wb.create_sheet("Schedule")
@@ -697,15 +839,12 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     # ---------------------------------------------------- Metadata values --
     for i, (key, value) in enumerate(
         [
-            ("DocumentNumber", f"='Revision page'!B{summary_rows['Document no']}"),
-            ("ScheduleName", f"='Revision page'!B{summary_rows['Schedule name']}"),
-            ("Revision", f"='Revision page'!B{summary_rows['Revision']}"),
-            ("IssueDate", f"='Revision page'!B{summary_rows['Date']}"),
-            ("Status", f"='Revision page'!B{summary_rows['Suitability Status']}"),
-            (
-                "StatusDescription",
-                f"='Revision page'!B{summary_rows['Suitability Description']}",
-            ),
+            ("DocumentNumber", f"={summary_ref('document_number')}"),
+            ("ScheduleName", f"={summary_ref('schedule_name')}"),
+            ("Revision", f"={summary_ref('revision')}"),
+            ("IssueDate", f"={summary_ref('date')}"),
+            ("Status", f"={summary_ref('status')}"),
+            ("StatusDescription", f"={summary_ref('status_description')}"),
             ("Building", f"=Config!$B${conf_rows['Building']}"),
             ("EquipmentCode", f"=Config!$B${conf_rows['EquipmentCode']}"),
         ],
@@ -718,6 +857,14 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
 
     for hidden in ("Config", "Lists", "Library"):
         wb[hidden].sheet_state = "hidden"
+
+    # Metadata is machine-readable, not something a reader should be handed. It
+    # carries no print area, so LibreOffice printed it -- which put two pages of
+    # key/value pairs in front of the cover of every issued PDF. Hidden sheets
+    # are still readable by openpyxl and by Power Query, so nothing that consumes
+    # it loses anything; a working copy keeps the v1 sheet layout exactly.
+    if issue:
+        wb["Metadata"].sheet_state = "hidden"
     wb._sheets = [
         wb["Metadata"], wb["Front Cover"], wb["Revision page"], wb["Schedule"],
         wb["Config"], wb["Lists"], wb["Library"],
@@ -731,7 +878,13 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
 
 
 def _column_values(content: ScheduleContent, col) -> Iterable[Any]:
-    """Every value that will land in this column, for width measurement."""
+    """Every value that will land in this column, for width measurement.
+
+    Includes the computed values as well as the typed ones. An issued export
+    writes the snapshot literally and embeds no library, so measuring only the
+    typed columns left every product and every calculated column sized from its
+    header alone -- which is exactly where the clipping was.
+    """
     key, name = col.legacy_name, col.name
     if col.kind == "input":
         for row in content.rows:
@@ -743,20 +896,39 @@ def _column_values(content: ScheduleContent, col) -> Iterable[Any]:
             value = product.get(key, product.get(name))
             if value not in (None, ""):
                 yield value
+
+    # What each row will actually show, from a snapshot or from an override.
+    for computed in content.computed:
+        value = computed.get(key, computed.get(name))
+        if value not in (None, ""):
+            yield _rounded(value)
+    for overrides in content.overrides:
+        value = overrides.get(key)
+        if value not in (None, ""):
+            yield value
+
     if col.unit:
         yield col.unit
 
 
+def _rounded(value: Any) -> Any:
+    """A number as the sheet will show it: two decimals, not seventeen."""
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return value
+
+
 def _apply_branding(cover, content: ScheduleContent) -> None:
-    """Put the organisation's logo and title colours on the cover.
+    """Put the organisation's logo on the cover.
 
     openpyxl cannot write shapes, but it *can* write images -- so a logo is the
-    one piece of branding that survives generation. The house cover's drawn
-    elements still need the cover-template route.
+    one piece of branding that survives generation faithfully. The house cover's
+    drawn elements still need the cover-template route, and the fonts, colours
+    and which fields appear are carried out by the renderer itself rather than
+    by anything pasted in here.
     """
     branding = content.branding
-    logo = branding.get("logo")
-    if not logo:
+    if not branding.logo:
         return
 
     import base64
@@ -768,6 +940,7 @@ def _apply_branding(cover, content: ScheduleContent) -> None:
         return
 
     try:
+        logo = branding.logo
         raw = logo.split(",", 1)[1] if logo.startswith("data:") else logo
         stream = io.BytesIO(base64.b64decode(raw))
         image = XlImage(stream)
@@ -775,11 +948,11 @@ def _apply_branding(cover, content: ScheduleContent) -> None:
         # A broken logo must not stop a schedule being issued.
         return
 
-    scale = float(branding.get("logo_scale") or 1.0)
+    scale = branding.logo_scale
     if scale and scale != 1.0:
         image.width = int(image.width * scale)
         image.height = int(image.height * scale)
-    cover.add_image(image, branding.get("logo_anchor") or "A1")
+    cover.add_image(image, branding.logo_anchor or "A1")
 
 
 def _pretty(unit: str) -> str:
