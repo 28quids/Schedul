@@ -93,8 +93,18 @@ function draw() {
       el('div', { class: 'btn-row' }, [
         schedule.locked ? pill('issued', 'amber') : null,
         el('span', { class: 'saving', id: 'save-state' }),
+        // An export is a document being sent to somebody, so it is plain by
+        // default. The working copy keeps the editing colours for anyone who
+        // wants the file to look like the screen they typed it into.
         button('Export .xlsx', {
+          title: 'The issued document: neutral print styling, no editing colours',
           on: { click: () => download(`/api/schedules/${view.id}/export.xlsx`) },
+        }),
+        button('Working copy', {
+          title: 'The same numbers, with the editing colours kept',
+          on: {
+            click: () => download(`/api/schedules/${view.id}/export.xlsx?theme=editor`),
+          },
         }),
         store.pdfAvailable
           ? button('Export PDF', {

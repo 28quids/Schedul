@@ -10,6 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...core.branding import (
+    COVER_FIELDS, REVISION_FIELDS, SAFE_FONTS, Branding, validate_branding,
+)
 from ...core.house import HouseStandard
 from ...core.naming import NamingScheme
 from ...db.models import HouseStandardRow, Organisation
@@ -32,6 +35,73 @@ def read_settings(
         "house_standard": house.to_dict(),
         "naming_problems": scheme.validate(),
         "pattern_tokens": scheme.pattern_tokens,
+    }
+
+
+@router.get("/branding")
+def read_branding(
+    session: Session = Depends(get_db), org: Organisation = Depends(current_org)
+) -> dict[str, object]:
+    """The practice's branding, and what can be configured about a document.
+
+    The field lists come from the domain rather than being written out in the
+    browser, so a field the workbook reads by formula is shown as fixed in the
+    same breath as being listed -- there is no way to offer a switch that would
+    produce a broken document.
+    """
+    house = svc.house_standard_for(session, org.id)
+    branding = Branding.from_dict(house.branding)
+    return {
+        "branding": branding.to_dict(),
+        "fonts": list(SAFE_FONTS),
+        "cover_fields": [
+            {"key": f.key, "label": f.label, "optional": f.optional, "hint": f.hint}
+            for f in COVER_FIELDS
+        ],
+        "revision_fields": [
+            {"key": f.key, "label": f.label, "optional": f.optional, "hint": f.hint}
+            for f in REVISION_FIELDS
+        ],
+        "preview": _branding_preview(branding),
+    }
+
+
+def _branding_preview(branding: Branding) -> dict[str, object]:
+    """What the cover and the revision page would carry, without rendering one.
+
+    A faithful list of the rows in the order they would appear, so the settings
+    screen can show the effect of a change without generating a file for every
+    keystroke. It is the same resolution the renderer uses, so what it shows is
+    what would be produced.
+    """
+    return {
+        "cover": [
+            {"key": f.key, "label": f.label} for f in branding.cover_layout()
+        ],
+        "revision": [
+            {"key": f.key, "label": f.label} for f in branding.revision_layout()
+        ],
+        "cover_font": branding.cover_font,
+        "schedule_font": branding.schedule_font,
+        "title_size": branding.title_size,
+        "palette": dict(branding.palette),
+        "has_logo": bool(branding.logo),
+        "cover_subtitle": branding.cover_subtitle,
+        "cover_footer": branding.cover_footer,
+    }
+
+
+@router.post("/branding/preview")
+def preview_branding(
+    payload: HouseStandardIn,
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """What a branding change would produce, without saving it."""
+    branding = Branding.from_dict(payload.branding or {})
+    return {
+        "problems": validate_branding(payload.branding or {}),
+        "preview": _branding_preview(branding),
     }
 
 
@@ -74,7 +144,17 @@ def update_settings(
             )
         house.numbering_scope = payload.numbering_scope
     if payload.branding is not None:
+        problems = validate_branding(payload.branding)
+        if problems:
+            raise HTTPException(status_code=400, detail=problems)
         house.branding = payload.branding
+        # Branding owns the fonts and the two title colours; the house style
+        # holds them because that is what the renderer reads. Keeping them in
+        # step here means there is still one answer to "what font is this in".
+        house.house_style = {
+            **house.house_style,
+            **Branding.from_dict(payload.branding).house_style_overrides(),
+        }
 
     if row is None:
         row = HouseStandardRow(organisation_id=org.id)

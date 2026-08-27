@@ -540,3 +540,45 @@ tr.detail-row > td { background: var(--grey-50); padding: 8px 12px; }
 }
 .layer-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .layer-panel .note-list { padding-left: 16px; margin-top: 6px; }
+
+/* -------------------------------------------------------------- branding --- */
+
+.colour-field { display: flex; gap: 6px; align-items: center; }
+.colour-field input[type="color"] {
+  width: 34px; height: 30px; padding: 2px; border: 1px solid var(--grey-300);
+  border-radius: var(--radius); background: var(--white); cursor: pointer;
+}
+.colour-field input[type="text"] { flex: 1; min-width: 0; }
+.logo-thumb {
+  max-height: 56px; max-width: 200px; border: 1px solid var(--grey-200);
+  border-radius: var(--radius); padding: 4px; background: var(--white);
+  vertical-align: middle; margin-right: 8px;
+}
+
+.field-chooser { display: flex; flex-direction: column; gap: 2px; }
+.chooser-row {
+  display: flex; gap: 8px; align-items: center; padding: 5px 8px;
+  border: 1px solid transparent; border-radius: var(--radius); font-size: 12.5px;
+}
+.chooser-row:hover { background: var(--grey-50); border-color: var(--grey-200); }
+.chooser-row[draggable="true"] { cursor: grab; }
+.chooser-row.dragging { opacity: .45; }
+.chooser-row.fixed { color: var(--grey-600); }
+.fixed-mark { color: var(--grey-400); font-size: 9px; width: 13px; text-align: center; }
+
+/* A faithful list of what the document would carry, not a mock-up of one:
+   the rows come from the same resolution the renderer uses. */
+.preview-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.doc-preview {
+  border: 1px solid var(--grey-300); border-radius: var(--radius); background: var(--white);
+  padding: 16px; margin-top: 6px; min-height: 220px;
+}
+.doc-logo { max-height: 48px; max-width: 160px; margin-bottom: 12px; display: block; }
+.doc-fields { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.doc-label { font-size: 10px; font-weight: 700; color: var(--grey-700); }
+.doc-value { font-size: 11px; color: var(--grey-500); }
+.doc-title { font-weight: 700; line-height: 1.25; }
+.doc-sub { font-size: 12px; color: var(--grey-700); margin-top: 6px; }
+.doc-footer { font-size: 10px; color: var(--grey-500); margin-top: 18px; }
+.doc-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+.doc-table td { padding: 2px 4px; border-bottom: 1px solid var(--grey-100); }

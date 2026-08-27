@@ -35,9 +35,27 @@ from ..schemas import RegisterRow
 
 router = APIRouter(prefix="/api", tags=["export"])
 
+#: 'issue' is a document being sent to somebody: plain, no editing aids.
+#: 'editor' keeps the yellow input fill and the colour contract, for a working
+#: copy. The default is 'issue' because that is what an export is usually for.
+THEMES = ("issue", "editor")
+
+
+def _check_theme(theme: str) -> None:
+    if theme not in THEMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"theme must be one of {', '.join(THEMES)}",
+        )
+
 
 def _content(
-    session: Session, schedule: Schedule, org: Organisation, *, target: str = "xlsx"
+    session: Session,
+    schedule: Schedule,
+    org: Organisation,
+    *,
+    target: str = "xlsx",
+    theme: str = "issue",
 ) -> ScheduleContent:
     building = schedule.building
     project = building.project
@@ -68,7 +86,7 @@ def _content(
         building_name=building.name,
         rows=[dict(r.values or {}) for r in schedule.rows],
         overrides=[dict(r.overrides or {}) for r in schedule.rows],
-        theme=target,
+        theme=theme,
         revisions=revisions_of(schedule),
         products=product_rows,
         doc_type=str(tokens.get("doc_type") or scheme.tokens["doc_type"].value),
@@ -89,13 +107,22 @@ def _filename(session: Session, schedule: Schedule, org: Organisation) -> str:
 
 @router.get("/schedules/{schedule_id}/export.xlsx")
 def export_schedule_xlsx(
+    theme: str = "issue",
     schedule: Schedule = Depends(get_schedule),
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
 ) -> FileResponse:
+    """The workbook, in the issue theme unless a working copy is asked for.
+
+    A file that leaves the office is read, not filled in, so it defaults to the
+    neutral print theme: no yellow input fill, no blue-green-black colour
+    contract. ``?theme=editor`` gives the working colours back for somebody who
+    wants the file to look like the screen they were typing into.
+    """
+    _check_theme(theme)
     tmp = Path(tempfile.mkdtemp(prefix="schedul-"))
     name = _filename(session, schedule, org)
-    path = render_schedule(_content(session, schedule, org), tmp / name)
+    path = render_schedule(_content(session, schedule, org, theme=theme), tmp / name)
     return FileResponse(
         path,
         filename=name,
@@ -119,7 +146,9 @@ def export_schedule_pdf(
         )
     tmp = Path(tempfile.mkdtemp(prefix="schedul-"))
     name = _filename(session, schedule, org)
-    xlsx = render_schedule(_content(session, schedule, org), tmp / name)
+    xlsx = render_schedule(
+        _content(session, schedule, org, target="pdf", theme="issue"), tmp / name
+    )
     try:
         produced = pdf_export.to_pdf(xlsx, tmp)
     except pdf_export.PdfError as exc:
@@ -190,6 +219,7 @@ def export_issued_revision(
 @router.get("/projects/{project_id}/export.zip")
 def export_project_zip(
     fmt: str = "xlsx",
+    theme: str = "issue",
     project: Project = Depends(get_project),
     session: Session = Depends(get_db),
     org: Organisation = Depends(current_org),
@@ -201,6 +231,7 @@ def export_project_zip(
     layout is decided here from current data rather than migrated on disk, the
     promotion trap that section describes cannot happen.
     """
+    _check_theme(theme)
     if fmt == "pdf" and not pdf_export.available():
         raise HTTPException(status_code=503, detail="LibreOffice was not found")
 
@@ -216,7 +247,14 @@ def export_project_zip(
         target.mkdir(parents=True, exist_ok=True)
         for schedule in svc.live_schedules(session, building):
             name = _filename(session, schedule, org)
-            xlsx = render_schedule(_content(session, schedule, org), target / name)
+            xlsx = render_schedule(
+                _content(
+                    session, schedule, org,
+                    target="pdf" if fmt == "pdf" else "xlsx",
+                    theme="issue" if fmt == "pdf" else theme,
+                ),
+                target / name,
+            )
             if fmt == "pdf":
                 try:
                     pdf_export.to_pdf(xlsx, target)

@@ -70,6 +70,7 @@ function draw() {
       ]),
       el('div', { class: 'btn-row' }, [
         button('Export all (.xlsx)', {
+          title: 'Every schedule as an issued document, in one zip',
           on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=xlsx`) },
         }),
         store.pdfAvailable

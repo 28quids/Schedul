@@ -7,6 +7,9 @@ import { api } from '../api.js';
 import {
   button, card, clear, el, fail, field, input, mount, notice, pill, select, table, toast,
 } from '../ui.js';
+import { brandingSection } from './branding.js';
+
+const state = { tab: 'numbering' };
 
 export async function settingsView() {
   const settings = await api.settings.read();
@@ -22,7 +25,30 @@ export async function settingsView() {
         }),
       ]),
     ]),
+    el('div', { class: 'tabs' }, [
+      ['numbering', 'Numbering'],
+      ['content', 'Notes and constants'],
+      ['branding', 'Branding'],
+    ].map(([key, label]) =>
+      el('button', {
+        class: `tab${state.tab === key ? ' active' : ''}`,
+        on: { click: () => { state.tab = key; settingsView(); } },
+      }, [label])
+    )),
   ]);
+
+  // Branding is its own screen's worth of settings, and it is the one that
+  // decides what a document looks like rather than what it is called.
+  if (state.tab === 'branding') {
+    const host = el('div');
+    page.appendChild(host);
+    mount(page);
+    await brandingSection(host);
+    return;
+  }
+
+  /** Append a card only when its tab is the one being shown. */
+  const add = (tab, node) => { if (state.tab === tab) page.appendChild(node); };
 
   /* -------------------------------------------------------- numbering --- */
 
@@ -91,7 +117,7 @@ export async function settingsView() {
     } catch (error) { fail(error); }
   };
 
-  page.appendChild(card(
+  add('numbering', card(
     'Document numbering',
     el('div', {}, [
       problemBox,
@@ -113,12 +139,13 @@ export async function settingsView() {
     value: house.general_notes.join('\n'),
   });
 
-  page.appendChild(card(
+  add('content', card(
     'General notes',
     el('div', {}, [
       el('p', { class: 'muted tiny' }, [
-        'One per line. These print at the top of every schedule, before any notes specific ' +
-        'to the equipment type.',
+        'One per line. These print at the top of every schedule in the practice, before ' +
+        'anything a project adds and before anything specific to the equipment type. A ' +
+        'single schedule can still take its notes over if it has to say something else.',
       ]),
       notesArea,
     ]),
@@ -149,7 +176,7 @@ export async function settingsView() {
     ]);
   });
 
-  page.appendChild(card(
+  add('content', card(
     'Design constants',
     table(['Constant', 'Default'], constantRows),
     [button('Save constants', {
@@ -181,7 +208,7 @@ export async function settingsView() {
     house.numbering_scope || 'building'
   );
 
-  page.appendChild(card(
+  add('numbering', card(
     'How numbers are allocated',
     el('div', {}, [
       field('Scope', scope,
@@ -223,7 +250,7 @@ export async function settingsView() {
     ]);
   });
 
-  page.appendChild(card(
+  add('numbering', card(
     'Volumes and discipline',
     el('div', {}, [
       table(['Code', 'Description', 'Discipline'], volumeRows),
@@ -249,7 +276,7 @@ export async function settingsView() {
     })]
   ));
 
-  page.appendChild(card(
+  add('numbering', card(
     'Suitability codes',
     table(
       ['Code', 'Description'],

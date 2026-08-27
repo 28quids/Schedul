@@ -162,5 +162,8 @@ export const api = {
   settings: {
     read: () => request('GET', '/api/settings'),
     update: (body) => request('PUT', '/api/settings', body),
+    branding: () => request('GET', '/api/settings/branding'),
+    previewBranding: (branding) =>
+      request('POST', '/api/settings/branding/preview', { branding }),
   },
 };
