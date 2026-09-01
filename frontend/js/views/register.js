@@ -10,7 +10,7 @@ import { api } from '../api.js';
 import { go, store } from '../app.js';
 import {
   button, card, clear, el, empty, fail, formatDate, input, modal, mount, notice,
-  pill, select, table, toast,
+  pageHead, pill, select, table, toast,
 } from '../ui.js';
 
 const state = { query: '', status: '', open: new Set(), mode: 'projects' };
@@ -93,25 +93,18 @@ export async function registerView(query = '') {
   });
 
   const page = el('div', { class: 'page page-wide' }, [
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: 'Register' }),
-        el('div', {
-          class: 'sub',
-          text: only
-            ? `${rows.length} schedule(s) on this project. Always current — nothing to refresh.`
-            : `${rows.length} schedule(s) across ${projects.length} project(s). ` +
-              'Always current — nothing to refresh.',
-        }),
-      ]),
-      el('div', { class: 'btn-row' }, [
-        only
-          ? button('Show every project', { on: { click: () => go('/register') } })
-          : null,
+    pageHead(
+      'Register',
+      only
+        ? `${rows.length} schedule(s) on this project. Always current — nothing to refresh.`
+        : `${rows.length} schedule(s) across ${projects.length} project(s). ` +
+          'Always current — nothing to refresh.',
+      [
+        only ? button('Show every project', { on: { click: () => go('/register') } }) : null,
         modeSwitch,
         button('Copy as TSV', { on: { click: () => copyTsv(rows.filter(matches)) } }),
-      ]),
-    ]),
+      ]
+    ),
   ]);
 
   if (!rows.length) {

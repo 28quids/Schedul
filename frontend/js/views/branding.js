@@ -112,16 +112,17 @@ function render(host) {
     'What the cover shows',
     fieldChooser('cover', b.coverFields, host),
     [saveButton(host)],
-    'Hide what a job does not need — Building on a single-building project, for instance. ' +
-    'Drag to reorder.'
+    'The practice-wide default for every job. One project can differ — its own page ' +
+    'has the same list — so hide here only what the practice never issues. Drag to reorder.'
   ));
 
   host.appendChild(card(
     'What the revision page shows',
     fieldChooser('revision', b.revisionFields, host),
     [saveButton(host)],
-    'Some rows are read by the cover and the Metadata sheet, so they cannot be hidden: ' +
-    'a document with a broken reference in it is worse than a longer page.'
+    'The practice-wide default; a project can differ from it on its own page. Some rows ' +
+    'are read by the cover and the Metadata sheet, so they cannot be hidden anywhere: a ' +
+    'document with a broken reference in it is worse than a longer page.'
   ));
 
   host.appendChild(card(

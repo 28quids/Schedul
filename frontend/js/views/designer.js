@@ -17,8 +17,8 @@
 import { api } from '../api.js';
 import { go } from '../app.js';
 import {
-  button, card, clear, confirmDialog, debounce, el, empty, fail, field, input,
-  modal, mount, notice, pill, select, show, table, toast,
+  button, card, clear, confirmDialog, debounce, el, empty, fail, field, input, modal,
+  mount, notice, pageHead, pill, select, show, table, textarea, toast,
 } from '../ui.js';
 
 let d = null;
@@ -93,19 +93,17 @@ function draw() {
     el('div', { class: 'crumbs' }, [
       el('a', { href: '#/catalogue', text: 'Schedule types' }), ' / ', d.code || 'New type',
     ]),
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: d.id ? `${d.code} — ${d.title}` : 'New schedule type' }),
-        el('div', { class: 'sub' }, [
-          d.id ? `Version ${d.version}. ` : '',
-          'Type in the table below. Drag a column to move it, drag its edge to size it.',
-        ]),
-      ]),
-      el('div', { class: 'btn-row' }, [
+    pageHead(
+      d.id ? `${d.code} — ${d.title}` : 'New schedule type',
+      (d.id ? `Version ${d.version}. ` : '') +
+        'Type in the table below. Drag a column to move it, drag its edge to size it.',
+      [
         d.id ? button('Where is this used?', { on: { click: showUsage } }) : null,
-        button(d.id ? 'Save changes' : 'Create type', { class: 'btn btn-primary', on: { click: save } }),
-      ]),
-    ]),
+        button(d.id ? 'Save changes' : 'Create type', {
+          class: 'btn btn-primary', on: { click: save },
+        }),
+      ]
+    ),
   ]);
 
   const feedback = el('div', { id: 'designer-feedback' });
@@ -663,8 +661,8 @@ function notesCard() {
     d.notes.forEach((note, i) => {
       list.appendChild(el('div', { class: 'note-row' }, [
         el('span', { class: 'muted tiny', text: `[${d.projectNotes.length + i + 1}]` }),
-        el('textarea', {
-          rows: 2, value: note,
+        textarea(note, {
+          rows: 2,
           on: { input: (e) => { d.notes[i] = e.target.value; } },
         }),
         el('button', {

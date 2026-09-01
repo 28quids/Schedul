@@ -21,10 +21,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.catalogue import MODEL_REFERENCE, Column, ScheduleType
+from ..core import references
 from ..core.formula import BLANK, FormulaError, Node, evaluate
 from ..db.models import Equipment, Schedule, ScheduleRow
 
-__all__ = ["CellValue", "GridRow", "Grid", "build_grid", "compute_row", "library_index"]
+__all__ = [
+    "CellValue", "GridRow", "Grid", "build_grid", "compute_row", "library_index",
+    "suggestions_for",
+]
 
 
 @dataclass(slots=True)
@@ -221,6 +225,50 @@ def build_grid(
 #: A value that is unambiguously a number. Leading zeros are excluded on
 #: purpose: '0123' is a reference someone typed, not the number 123.
 _NUMERIC = re.compile(r"^-?(0|[1-9]\d*)(\.\d+)?$")
+
+
+def suggestions_for(rows, schedule_type: ScheduleType) -> dict[str, dict[str, Any]]:
+    """What this schedule already says, per column, for the editor to offer.
+
+    Two different offers, from the same reading of the column:
+
+    ``values``  what has been typed in it before, most-used first. Typing 'Cu'
+                in a Location column that already says Cupboard forty times
+                should not mean typing the other six letters.
+    ``next``    the reference after the last one, so adding a row does not mean
+                typing ``MVHR-006`` when the row above says ``MVHR-005``.
+
+    Both are read out of the schedule rather than out of a convention this code
+    holds: a practice that numbers its units another way gets its own way back,
+    and a column nobody has filled in offers nothing rather than guessing.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    ordered = sorted(rows, key=lambda r: r.position)
+
+    for column in [*schedule_type.inputs, _reference_column()]:
+        key = column.legacy_name
+        values = [
+            str(v).strip()
+            for v in ((r.values or {}).get(key) for r in ordered)
+            if v not in (None, "") and str(v).strip()
+        ]
+        counts: dict[str, int] = {}
+        for value in values:
+            counts[value] = counts.get(value, 0) + 1
+        # Most-used first, and alphabetical within a tie so the order is stable
+        # between two requests that saw the same data.
+        distinct = sorted(counts, key=lambda v: (-counts[v], v.lower()))
+        out[key] = {
+            "values": distinct[:200],
+            "counts": {v: counts[v] for v in distinct[:200]},
+            "next": references.next_in_column(values),
+        }
+    return out
+
+
+def _reference_column() -> Column:
+    """The automatic Model Reference column, which is an input like any other."""
+    return Column(kind="input", name=MODEL_REFERENCE, width=18, example="")
 
 
 def coerce(value: Any) -> Any:

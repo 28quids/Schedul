@@ -45,9 +45,9 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from ..core.branding import Branding
+from ..core.branding import Branding, with_project_overrides
 from ..core.catalogue import MODEL_REFERENCE, ScheduleType
-from ..core.formula import CONSTANTS, FormulaError, to_excel
+from ..core.formula import CONSTANTS, FormulaError, field_names, to_excel
 from ..core.house import HouseStandard
 from ..core.revisions import PRELIMINARY_BASE, PUBLISHED_BASE, Revision, rank
 from ..core.units import split_unit
@@ -128,6 +128,13 @@ def _fit_title(text: str, chars_available: float, wanted: int, max_lines: int = 
     return size, max(1, math.ceil(len(text) / per_line))
 
 
+#: A default row is 15 points tall, and an A4 portrait page with the default
+#: three-quarter-inch margins has about 734 points of usable height. Both are
+#: needed to place the cover's title block without overflowing the page.
+_ROW_POINTS = 15.0
+_COVER_PAGE_POINTS = 734.0
+
+
 def _page(ws, landscape: bool) -> None:
     ws.page_setup.orientation = "landscape" if landscape else "portrait"
     ws.page_setup.paperSize = A4
@@ -164,12 +171,16 @@ class ScheduleContent:
         classification: str = "",
         theme: str = "xlsx",
         notes: Sequence[str] | None = None,
+        branding_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.schedule_type = schedule_type
         self.house = house
         self.project_fields = project_fields
         self.design_constants = design_constants
         self.docnum = docnum
+        #: What this one job answers differently about which fields appear.
+        #: Fonts, colours and the logo stay house standard -- see core.branding.
+        self.branding_overrides = dict(branding_overrides or {})
         self.building_ref = building_ref
         self.building_name = building_name
         self.rows = list(rows)
@@ -211,8 +222,15 @@ class ScheduleContent:
 
     @property
     def branding(self) -> Branding:
-        """The practice's document appearance, as the renderer's instructions."""
-        return Branding.from_dict(self.house.branding)
+        """The practice's document appearance, as the renderer's instructions.
+
+        The house standard with this project's own answers folded in, so a job
+        with no buildings and no BSUID can drop those rows without every other
+        job in the practice losing them.
+        """
+        return Branding.from_dict(
+            with_project_overrides(self.house.branding, self.branding_overrides)
+        )
 
     @property
     def house_style(self) -> dict[str, Any]:
@@ -229,6 +247,27 @@ class ScheduleContent:
         if self.building_ref and self.building_name:
             return f"{self.building_ref} - {self.building_name}"
         return self.building_ref or self.building_name
+
+    @property
+    def document_title(self) -> str:
+        """The project as the cover and the revision page name it.
+
+        Block capitals, and the building appended when the job has one worth
+        naming: ``MOTE ROAD - BLOCK A``. A house title block is set in capitals
+        whatever somebody typed into the project form, and on a job of several
+        blocks the block is half of what identifies the document -- putting it
+        in the title is what stops two covers reading identically.
+
+        Only the building's *name* is appended. A single-building job carries a
+        reference the manager allocated rather than a block anybody named, and
+        'HEAD OFFICE - CM1' says nothing the document number does not.
+        """
+        project = str(self.project_fields.get("Project Name", "") or "").strip()
+        base = project.upper()
+        building = str(self.building_name or "").strip().upper()
+        if building and building != base:
+            return f"{base} - {building}" if base else building
+        return base
 
 
 def _notes_block(content: ScheduleContent) -> str:
@@ -329,6 +368,9 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     put("DocumentNumber", content.docnum)
     put("Building", content.building_label)
     put("BuildingRef", content.building_ref)
+    # The title block's own line, stored once so the cover and the revision page
+    # cannot disagree about how this document names itself.
+    put("ProjectTitle", content.document_title)
     for key, value in content.project_fields.items():
         put(key, value)
     for key, value in content.design_constants.items():
@@ -397,7 +439,27 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
 
     # ------------------------------------------------------ Revision page --
     rv = wb.create_sheet("Revision page")
-    for col, w in zip("ABCDEFG", [16, 34, 12, 13, 13, 13, 48]):
+    # Column B carries the summary values, and the longest of them is the
+    # document number: an ISO 19650 number is sixty-odd characters, so a fixed
+    # 34 clipped it and left the one field a reader looks up unreadable. The
+    # width follows what is actually going in the column, capped so a long
+    # client name cannot push the block off an A4 page.
+    summary_widest = max(
+        (
+            len(str(v))
+            for v in (
+                content.docnum,
+                content.document_title,
+                content.building_label,
+                content.project_fields.get("Client", ""),
+                stype.title,
+            )
+            if v
+        ),
+        default=0,
+    )
+    b_width = min(max(34, summary_widest + 2), 72)
+    for col, w in zip("ABCDEFG", [16, b_width, 12, 13, 13, 13, 48]):
         rv.column_dimensions[col].width = w
 
     # The title block, sized to the width it actually has. See _fit_title.
@@ -405,7 +467,7 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     rv_size, rv_lines = _fit_title(stype.title, rv_width, hs["title_size"])
 
     rv.merge_cells("A3:G3")
-    rv["A3"] = f"=Config!$B${conf_rows['Project Name']}"
+    rv["A3"] = f"=Config!$B${conf_rows['ProjectTitle']}"
     rv["A3"].font = Font(
         name=hs["cover_font"], size=rv_size, bold=True, color=st.grey
     )
@@ -421,9 +483,16 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
 
     # The summary block starts at row 10 and its length is not fixed: adding a
     # field costs one entry in this list, and nothing downstream hardcodes a row.
+    #
+    # The revision log then follows two rows under whatever the block ends on,
+    # rather than at a fixed row 44. The gap used to hold an explanatory note
+    # that has been removed, and leaving it would put a hand's width of blank
+    # page in the middle of an issued document.
     SUMMARY_TOP = 10
-    log_top = SUMMARY_TOP + 34
-    log_hdr = log_top - 1
+    layout_fields = brand.revision_layout()
+    summary_bottom = SUMMARY_TOP + len(layout_fields) - 1
+    log_hdr = summary_bottom + 3
+    log_top = log_hdr + 1
     log_bot = log_top + rev_rows - 1
 
     KEY = "H"  # hidden sort-key helper column
@@ -454,7 +523,10 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     # are marked as not optional there and cannot be dropped, so a configured
     # document can never come out with a broken reference in it.
     summary_values: dict[str, tuple[Any, str | None]] = {
-        "project_name": (f"=Config!$B${conf_rows['Project Name']}", None),
+        # Block capitals, like the title block above it: a house document sets
+        # the project in capitals whatever was typed into the project form.
+        # UPPER rather than a second stored copy, so a rename is still one write.
+        "project_name": (f"=UPPER(Config!$B${conf_rows['Project Name']})", None),
         "project_number": (f"=Config!$B${conf_rows['Project Number']}", None),
         "building": (f"=Config!$B${conf_rows['Building']}", None),
         "recipient": (f"=Config!$B${conf_rows['Client']}", None),
@@ -477,7 +549,6 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
         "trigger_events": ("", None),
     }
 
-    layout_fields = brand.revision_layout()
     summary_rows: dict[str, int] = {}
     for offset, field_spec in enumerate(layout_fields):
         r = SUMMARY_TOP + offset
@@ -489,14 +560,6 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
         c.alignment = LFT
         if fmt:
             c.number_format = fmt
-
-    derived_last = SUMMARY_TOP + len(layout_fields) - 1
-    rv.cell(
-        derived_last + 3, 1,
-        f"Rows {SUMMARY_TOP} to {derived_last} derive from the "
-        f"most recent revision below, ranked by series then number so a published "
-        f"C-revision outranks every preliminary one. Do not type into them.",
-    ).font = Font(name=hs["cover_font"], size=8, italic=True, color="595959")
 
     def summary_ref(key: str) -> str:
         """A reference to one summary row, for the cover and the Metadata sheet.
@@ -608,7 +671,11 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
         "building": (f"=Config!$B${conf_rows['Building']}", None),
     }
 
-    COVER_TOP = 11
+    # The labelled block starts on row 1. It used to start on row 11, and the
+    # ten blank rows above it were the reason a cover with nothing unusual on it
+    # printed across two pages: a fixed A1:G50 print area plus two title rows
+    # of forty-odd points is taller than an A4 page has room for.
+    COVER_TOP = 1
     cover_layout = brand.cover_layout()
     for offset, field_spec in enumerate(cover_layout):
         value, fmt = cover_values.get(field_spec.key, ("", None))
@@ -619,15 +686,28 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
         if fmt:
             cell.number_format = fmt
 
-    # The title block sits below the fields, wherever they end, so hiding one
-    # tightens the page instead of leaving a hole in it.
-    title_row = max(41, COVER_TOP + len(cover_layout) * 3 + 2)
     cover_width = sum(fcv.column_dimensions[get_column_letter(i)].width for i in range(1, 8))
     title_size, title_lines = _fit_title(stype.title, cover_width, hs["title_size"])
     wrapped = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
+    # Where the title block goes. It sits below the fields, and the space left
+    # on the page below them is split above and under it, so the project name
+    # lands near the middle rather than jammed against the bottom margin. When
+    # a long field list leaves no slack it is simply pushed down: overflowing a
+    # page is worse than not being centred, but a centred block is the aim.
+    fields_bottom = COVER_TOP + len(cover_layout) * 3 - 2
+    title_height = max(40, title_size * 1.45) + max(40, title_size * 1.45 * title_lines)
+    tail_rows = (
+        (1 if any(f.key == "building" for f in cover_layout) else 0)
+        + (1 if brand.cover_subtitle else 0)
+        + (2 if brand.cover_footer else 0)
+    )
+    free = _COVER_PAGE_POINTS - fields_bottom * _ROW_POINTS - title_height - tail_rows * _ROW_POINTS
+    gap_rows = max(2, int(free / 2 / _ROW_POINTS))
+    title_row = fields_bottom + gap_rows
+
     fcv.merge_cells(f"A{title_row}:G{title_row}")
-    fcv[f"A{title_row}"] = f"=Config!$B${conf_rows['Project Name']}"
+    fcv[f"A{title_row}"] = f"=Config!$B${conf_rows['ProjectTitle']}"
     fcv[f"A{title_row}"].font = Font(
         name=hs["cover_font"], size=title_size, bold=True, color=st.grey
     )
@@ -672,9 +752,14 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
     _apply_branding(fcv, content)
 
     _page(fcv, landscape=False)
+    # A cover is one page by definition, so it says so rather than hoping the
+    # arithmetic above always lands inside the margins. fitToHeight=1 makes a
+    # cover that has been pushed long by a dozen fields scale down instead of
+    # spilling a title block onto a second sheet.
+    fcv.page_setup.fitToHeight = 1
     # The print area follows the content: a fixed A1:G50 clipped a cover with a
     # footer on it and left half a page of white on one without.
-    fcv.print_area = f"A1:G{max(50, cover_bottom + 2)}"
+    fcv.print_area = f"A1:G{cover_bottom}"
 
     # ---------------------------------------------------------- Schedule ---
     sc = wb.create_sheet("Schedule")
@@ -782,6 +867,15 @@ def render_schedule(content: ScheduleContent, out_path: str | Path) -> Path:
                     c.value = None
                     continue
                 parsed[col.legacy_name] = node
+            # A column a formula reads but that is not on this sheet cannot be
+            # referenced, so the cell is left blank rather than emitting a
+            # reference into thin air. The API refuses to hide such a column, so
+            # this is the belt to that braces: a workbook with #REF! in it is
+            # worse than a workbook with a blank column in it.
+            missing = [n for n in field_names(node) if n not in colmap]
+            if missing:
+                c.value = None
+                continue
             body = to_excel(node, lambda name: f"${colmap[name]}{r0}")
             c.value = f'=IF(${anchor}{r0}="","",IFERROR({body},""))'
             c.font = st.f_calc

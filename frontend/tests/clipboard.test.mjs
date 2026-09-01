@@ -87,3 +87,67 @@ test('a selection reads typed values and computed ones alike', () => {
   });
   assert.deepEqual(matrix, [['A', '', 900]]);
 });
+
+/* ------------------------------------------------ repeating across a range --- */
+
+const row = (id) => ({ id, values: {}, computed: {} });
+const editable = (name) => ({ legacy_name: name, editable: true, kind: 'input' });
+
+test('one copied cell fills the whole selection, as a spreadsheet does', () => {
+  const rows = [row('a'), row('b'), row('c'), row('d')];
+  const plan = planBlockPaste({
+    matrix: [['450']],
+    rows,
+    columns: [editable('Supply Airflow (l/s)')],
+    top: 0,
+    left: 0,
+    selection: { top: 0, bottom: 3, left: 0, right: 0 },
+  });
+  assert.equal(plan.edits.length, 4, 'every selected cell takes the value');
+  assert.equal(plan.cells, 4);
+  assert.equal(plan.repeated, true);
+  assert.equal(plan.overflow, 0, 'a repeat is bounded by the selection');
+});
+
+test('a block repeats across as well as down', () => {
+  const rows = [row('a'), row('b')];
+  const plan = planBlockPaste({
+    matrix: [['x', 'y']],
+    rows,
+    columns: [editable('A'), editable('B'), editable('C'), editable('D')],
+    top: 0,
+    left: 0,
+    selection: { top: 0, bottom: 1, left: 0, right: 3 },
+  });
+  assert.deepEqual(plan.edits[0].values, { A: 'x', B: 'y', C: 'x', D: 'y' });
+  assert.equal(plan.cells, 8);
+});
+
+test('a block that does not divide the selection is pasted once', () => {
+  // Excel refuses to guess here, and so does this: two rows into five is not a
+  // repeat anybody asked for.
+  const rows = [row('a'), row('b'), row('c'), row('d'), row('e')];
+  const plan = planBlockPaste({
+    matrix: [['1'], ['2']],
+    rows,
+    columns: [editable('A')],
+    top: 0,
+    left: 0,
+    selection: { top: 0, bottom: 4, left: 0, right: 0 },
+  });
+  assert.equal(plan.edits.length, 2);
+  assert.equal(plan.repeated, false);
+});
+
+test('a paste with no selection given behaves as it always did', () => {
+  const rows = [row('a'), row('b')];
+  const plan = planBlockPaste({
+    matrix: [['1'], ['2']],
+    rows,
+    columns: [editable('A')],
+    top: 0,
+    left: 0,
+  });
+  assert.equal(plan.edits.length, 2);
+  assert.equal(plan.repeated, false);
+});

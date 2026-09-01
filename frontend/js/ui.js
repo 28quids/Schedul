@@ -13,6 +13,13 @@ export function el(tag, attrs = {}, children = []) {
       for (const [event, handler] of Object.entries(value)) node.addEventListener(event, handler);
     } else if (key === 'dataset') {
       Object.assign(node.dataset, value);
+    } else if (node.tagName === 'TEXTAREA' && key === 'value') {
+      // A textarea's value is its text content, not an attribute. HTML has no
+      // `value` attribute on one at all, so `setAttribute('value', ...)` writes
+      // something the browser silently ignores and the box comes up empty. That
+      // is what emptied every notes box in the app, and worse, a Save then wrote
+      // the emptiness back over what was really there.
+      node.value = value ?? '';
     } else if (key in node && key !== 'list' && typeof value !== 'string') {
       node[key] = value;
     } else {
@@ -58,6 +65,18 @@ export function input(value, attrs = {}) {
   return el('input', { type: 'text', value: value ?? '', ...attrs });
 }
 
+/**
+ * A multi-line box, with its content set the way a textarea actually takes it.
+ *
+ * Exists so nobody has to remember that one: `input()` has a counterpart, and
+ * every notes box in the app goes through it.
+ */
+export function textarea(value, attrs = {}) {
+  const node = el('textarea', { rows: 6, ...attrs });
+  node.value = value ?? '';
+  return node;
+}
+
 export function select(options, value, attrs = {}) {
   const node = el('select', attrs);
   for (const option of options) {
@@ -81,6 +100,51 @@ export function notice(text, tone = 'info', items = []) {
     el('div', { text }),
     items.length ? el('ul', {}, items.map((i) => el('li', { text: i }))) : null,
   ]);
+}
+
+/**
+ * The head of a screen: what it is, what it is for, and what you can do to it.
+ *
+ * Every screen builds this the same way, because a page whose title sits in a
+ * slightly different place from the last one costs a beat of attention every
+ * time somebody moves between them. Actions go on the right, in a `btn-row` even
+ * when there is one of them, so a screen that grows a second button does not
+ * shuffle the first.
+ *
+ * The scheme for `actions`, top to bottom of the page and left to right within
+ * a row:
+ *
+ * - **`btn-primary`** — at most one per row: the thing this screen is for.
+ * - **`btn`** — everything else.
+ * - **`btn-danger`** — anything that removes something, and always last.
+ */
+export function pageHead(title, sub, actions = []) {
+  const list = (Array.isArray(actions) ? actions : [actions]).filter(Boolean);
+  return el('header', { class: 'page-head' }, [
+    el('div', {}, [
+      el('h1', { text: title }),
+      sub ? (typeof sub === 'string' ? el('div', { class: 'sub', text: sub }) : el('div', { class: 'sub' }, [sub])) : null,
+    ]),
+    list.length ? el('div', { class: 'btn-row' }, list) : null,
+  ]);
+}
+
+/**
+ * A row of buttons in labelled groups, separated by a rule.
+ *
+ * `groups` is `[[label, [buttons]], ...]`; anything after a `null` group goes to
+ * the right-hand end. Used wherever a screen has more than about four actions:
+ * grouping them by what they act on is what stops "where is delete" being a
+ * different answer on each screen.
+ */
+export function toolbar(groups, trailing = []) {
+  const nodes = groups
+    .filter(([, buttons]) => buttons.filter(Boolean).length)
+    .map(([label, buttons]) =>
+      el('div', { class: 'tool-group', title: label }, buttons.filter(Boolean)));
+  const end = (Array.isArray(trailing) ? trailing : [trailing]).filter(Boolean);
+  if (end.length) nodes.push(el('div', { class: 'toolbar-end' }, end));
+  return el('div', { class: 'sheet-toolbar' }, nodes);
 }
 
 export function card(title, body, actions = [], hint = '') {

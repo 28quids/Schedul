@@ -77,6 +77,7 @@ def _content(
     resolved = notes_svc.resolved_notes(schedule, stype, house, project)
     return ScheduleContent(
         notes=[n.text for n in resolved],
+        branding_overrides=project.branding_overrides or {},
         schedule_type=stype,
         house=house,
         project_fields=project.project_fields,

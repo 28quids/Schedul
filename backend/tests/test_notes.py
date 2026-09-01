@@ -197,3 +197,46 @@ class TestNotesReachTheDocuments:
 
         assert "reworded afterwards" not in snapshot["notes"]
         assert any("read in conjunction" in n for n in snapshot["notes"])
+
+
+class TestGettingTheHouseNotesBack:
+    """A practice that has emptied its general notes has somewhere to go.
+
+    Storing an empty list is a real answer -- a practice may print no notes --
+    so the defaults deliberately do not creep back on their own. That makes the
+    way back an offer the screen has to be able to make, which means the API has
+    to hand out the built-in wording rather than the screen inventing it.
+    """
+
+    def test_a_fresh_practice_starts_with_the_built_in_notes(self, client):
+        settings = client.get("/api/settings").json()
+        assert settings["house_standard"]["general_notes"], (
+            "the notes a schedule prints must be editable where the screen says they are"
+        )
+
+    def test_the_built_in_wording_is_offered_even_once_the_notes_are_emptied(self, client):
+        from schedul.core.house import DEFAULT_GENERAL_NOTES
+
+        client.put("/api/settings", json={"general_notes": []})
+        settings = client.get("/api/settings").json()
+        assert settings["house_standard"]["general_notes"] == []
+        assert settings["default_general_notes"] == list(DEFAULT_GENERAL_NOTES), (
+            "emptying the notes must not be a one-way door"
+        )
+
+    def test_restoring_them_puts_them_back_on_a_schedule(self, client, schedule):
+        from schedul.core.house import DEFAULT_GENERAL_NOTES
+
+        client.put("/api/settings", json={"general_notes": []})
+        assert not [
+            n for n in client.get(f"/api/schedules/{schedule}/notes").json()["note_layers"]
+            if n["source"] == "organisation"
+        ]
+
+        client.put("/api/settings", json={"general_notes": list(DEFAULT_GENERAL_NOTES)})
+        restored = [
+            n["text"]
+            for n in client.get(f"/api/schedules/{schedule}/notes").json()["note_layers"]
+            if n["source"] == "organisation"
+        ]
+        assert restored == list(DEFAULT_GENERAL_NOTES)

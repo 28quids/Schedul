@@ -420,3 +420,192 @@ compares the models against the database and adds what is missing. Deliberately
 one-directional: nothing there drops a column, renames one, or rewrites a value.
 An additive change is the only kind that cannot destroy somebody's work, and
 anything beyond it deserves a real migration tool and a backup.
+
+## The cover was two pages, and nobody could see why
+
+The front cover began on row 11, and its print area was a fixed `A1:G50`. Fifty
+rows of fifteen points plus two title rows of forty and eighty-seven is about
+850 points; an A4 page with the default margins holds about 734. Every cover the
+tool produced spilled onto a second sheet, and the ten blank rows at the top
+were doing nothing but making it worse.
+
+Both are gone. The fields start on row 1, the print area follows the content,
+and the title block is placed in the middle of the space left below the fields
+rather than at a fixed row 41 — pushed down only when a long field list leaves
+no slack, because overflowing a page is worse than not being centred.
+`fitToHeight = 1` on the cover is the guarantee behind the arithmetic: a cover is
+one page by definition, so it says so rather than hoping.
+
+The revision page had the mirror problem in the other direction — the log sat at
+a hardcoded row 44 with a note in the gap explaining that the summary rows derive
+from it. The note was true and belonged in the code, not on a document somebody
+issues, so the log now follows the summary block by two rows and the gap closed
+with it.
+
+## Block capitals, and the building in the title
+
+A house title block is set in capitals whatever was typed into the project form,
+and on a job of several blocks the block is half of what identifies the
+document. `MOTE ROAD - BLOCK A`, stored once on Config and read by both title
+blocks, so a rename is still one write.
+
+Only a building's *name* is appended. A single-building job carries a reference
+the manager allocated rather than a block anybody named, and `HEAD OFFICE - CM1`
+says nothing the document number does not.
+
+## Hiding a column is a decision about one document
+
+Column visibility already existed on the catalogue type: where a column belongs
+in general. What was missing was the answer to "keep the cost off the copy that
+goes to this client", which is about one schedule, and pushing it up to the type
+would change every schedule in the practice to settle a question about one.
+
+So a schedule carries its own show/hide map, per target — screen, Excel, PDF —
+folded in before the target filter, so `columns_for(schedule, target="pdf")` is
+the honest answer wherever it is asked. Two columns are refused rather than
+half-hidden: the lookup key, and any column a visible formula reads. The
+renderer also guards the emit itself, leaving such a cell blank rather than
+writing a reference to a column that is not on the sheet — a workbook with
+`#REF!` in it is worse than one with a blank column in it.
+
+## Branding is house standard, except the part that legitimately is not
+
+The branding screen offered "hide what a job does not need — Building on a
+single-building project, for instance", of a setting that reached every job in
+the practice. Either the note was wrong or the setting was in the wrong place.
+
+The setting was in the wrong place, but only partly: which fields a document
+carries is a decision about a document and two jobs differ, while fonts, colours
+and the logo are exactly what a house standard is for. So `core.branding`
+names the keys a project may answer — `PROJECT_KEYS` — and merges the show/hide
+maps key by key rather than replacing them, so a project hiding Building does
+not silently un-hide everything the practice had hidden. A project is validated
+as a whole branding payload, so it can no more hide a row the workbook reads
+than the organisation can.
+
+Three states per field, not two. A project that stored a plain boolean would
+freeze its answer at whatever the house standard said the day somebody opened
+the screen, and stop tracking the practice without being asked to.
+
+## The database left the source folder
+
+`SCHEDUL_DATA` defaulted to `./data`, relative to wherever the server was
+started — which is inside the checkout. Updating by pulling was fine. Updating
+the way most people update a tool they downloaded — fetch the new zip, unpack it
+somewhere else, run it — left the equipment library, the projects and the
+branding in the old folder and came up looking like a first run. Nothing was
+deleted and there was nowhere to go and look, which from where the user is
+standing is the same thing.
+
+The default is now the per-user data directory every other desktop application
+uses, and a database in the old location is copied up to it once on first start.
+Copied rather than moved: a migration that goes wrong should leave the original
+where it was. Settings shows the path and hands out a backup taken through
+SQLite's own backup API — a plain file copy of a database being written to is one
+that may not open, and a backup nobody can restore is worse than none for what
+it is believed to be.
+
+## A spreadsheet's fill handle, and a header row you can copy
+
+Two things people already know how to do that the tool made them learn again.
+
+Dragging a reference down is the single most common act on a schedule, and it
+needed finding a Fill series button in a toolbar. The selection now carries the
+corner handle: series by default where the value ends in digits, Ctrl to copy,
+upwards to count down, and a chip afterwards offering the other one. The rule
+itself stays in `core/references.py`; the browser sends a direction and a count.
+
+Getting a supplier's range into the library meant pasting a block into a
+textarea and mapping columns you had not seen yet. The library now hands out the
+spreadsheet with the headings already on it, and reads the filled-in file back
+through the planner the paste importer already uses. One renderer for the blank
+template, one type's export and the whole library, because two would eventually
+disagree about the headings and the file that came back would stop matching the
+file that went out.
+
+## A textarea has no value attribute, and four notes boxes were empty
+
+`el()` decided between setting a property and setting an attribute by asking
+whether the value was a string: strings became attributes, so they show in the
+DOM and can be styled. That is right for an `<input>`, whose `value` attribute
+is real, and wrong for a `<textarea>`, whose value is its text content and which
+has no `value` attribute at all. `setAttribute('value', ...)` on one writes
+something the browser reads back to nobody.
+
+Every notes box in the app was built that way — the house standard's, a
+project's, a schedule's own, and an equipment type's in the designer — so all
+four came up blank over notes that were really there. Blank would have been
+merely confusing; the Save button beside each of them then wrote the emptiness
+back, which is how a practice lost the five notes its schedules print while the
+schedules kept printing them and the screen kept saying they were editable here.
+
+Fixed in `el()` rather than at the four call sites, because the next textarea
+somebody adds would have had the same bug. `textarea()` now exists beside
+`input()` so the question does not come up again, and
+`frontend/tests/dom.test.mjs` asserts the rule both ways — a textarea's value is
+a property, an input's is still an attribute — against a DOM stand-in small
+enough to need no dependency.
+
+Emptying the notes is still allowed to mean what it says, because a practice
+that prints none is a real practice. What was missing was the way back: an empty
+stored list is indistinguishable from a deliberate one, so the defaults cannot
+creep back on their own. `/api/settings` therefore hands out the built-in
+wording alongside the stored notes, the screen offers it as a button, and a save
+that would remove every note says so first.
+
+## Suggestions are read out of the schedule, never imposed on it
+
+The grid offers three things now, and the rule behind all of them is the same:
+the answer comes from what the schedule already says, not from a convention this
+code holds.
+
+`MVHR-001` on the ground floor and `MVHR-101` on the first is one practice's
+numbering among many, and hardcoding it — or any of the alternatives — would be
+right for one firm and wrong for the rest. So `core/references.next_in_column`
+only ever reads the pattern: two values say which number moves and by how much,
+one says the last run does, and none says nothing. A practice that numbers its
+units another way gets its own way back for free, and there is no setting to get
+wrong.
+
+The same rule decides which number a fill counts. `RM0.01 2 Bedroom` could count
+rooms or beds; one seed cannot say, so the last run wins, which is the
+spreadsheet rule. Two seeds can say, and then they decide. Where neither
+settles it, the chip after the fill asks rather than the code guessing.
+
+The group offer — "the other four Cupboards have no airflow" — is deliberately
+the narrowest of the three, because it is the only one that writes to cells
+nobody is looking at. Empty cells only, two or more matching rows, the grouping
+column that matches most, and once. A wrong bulk edit costs far more than the
+typing it saves, and a suggestion that keeps coming back after being turned down
+stops being help.
+
+None of them commit anything. The inline completion arrives selected so typing
+replaces it, the next reference is a placeholder until Tab takes it, and the
+group offer is a button. That is what makes it safe for any of them to be wrong.
+
+## Two things that made the grid feel broken
+
+Neither was in the grid's logic.
+
+**Every toolbar button ignored its first click.** Clicking one with the caret in
+a cell blurs the cell, the blur saves, the save moves the selection, and the
+selection rebuilt the toolbar — replacing the button between the mousedown and
+the mouseup, so the click landed on a node that was no longer in the document.
+The toolbar is now built once per redraw and mutated in place. The general
+lesson is worth keeping: a node rebuilt in response to state cannot be a node
+somebody is in the middle of clicking.
+
+**Typing a reference and pressing Enter put it on the wrong line.** Typing
+schedules a save 500ms out; adding a row redraws immediately. The redraw
+rebuilt the cell from a row the server had not been told about yet. Every
+structural change now settles the pending saves before it runs.
+
+## The caret is not the selection's focus
+
+Enter walking a selected block needed a distinction the selection model did not
+have. A selection is anchor-to-focus, so moving the focus to walk the block
+would shrink the very rectangle being walked. `activeCell` is now a separate
+thing carried alongside, and extending a selection leaves it where the typing
+was — Shift+Down from the top of a column selects it and leaves you in the top
+cell, as a spreadsheet does, so Enter then starts at the top rather than the
+bottom.

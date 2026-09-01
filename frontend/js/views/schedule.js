@@ -24,14 +24,16 @@ import { api } from '../api.js';
 import { go, setContext, store } from '../app.js';
 import {
   anchoredList, button, card, clear, confirmDialog, debounce, download, el, empty,
-  fail, field, formatDate, input, modal, mount, notice, pill, select, show, table,
-  toast,
+  fail, field, formatDate, input, modal, mount, notice, pageHead, pill, select, show,
+  table, textarea, toast, toolbar,
 } from '../ui.js';
 import {
   bounds, cellSelection, cells as selectedCells, clampTo, columns as selectedColumns,
-  contains, isSingleCell, move, rows as selectedRows, selectRows, size, step,
+  activeCell, contains, isSingleCell, move, nextInRange, rows as selectedRows,
+  selectRows, size, step, withActive,
 } from '../grid/selection.js';
 import { decide } from '../grid/keys.js';
+import { productGrid } from './library-entry.js';
 import { parseTsv, planBlockPaste, selectionMatrix, toTsv } from '../grid/clipboard.js';
 
 let view = null;
@@ -44,6 +46,14 @@ const cellKey = (rowId, column) => `${rowId} ${column}`;
 let sel = null;
 /** True while a drag-select is in progress. */
 let dragging = false;
+/**
+ * The fill handle's drag, while one is in progress.
+ *
+ * `{ box, to }` — the selection the drag started from and the row it currently
+ * reaches. Kept separate from `sel` so the selection itself does not move while
+ * somebody is deciding how far to drag.
+ */
+let fillDrag = null;
 /** Which column a run of tabbing began in, so Enter comes back to it. */
 let tabAnchor = null;
 
@@ -103,26 +113,27 @@ function draw() {
       building_count > 1 ? `${building_ref} / ` : '',
       schedule.code,
     ]),
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: schedule.title }),
-        el('div', { class: 'sub' }, [el('span', { class: 'dn', text: schedule.docnum })]),
-      ]),
-      el('div', { class: 'btn-row' }, [
+    pageHead(
+      schedule.title,
+      el('span', { class: 'dn', text: schedule.docnum }),
+      [
         schedule.locked ? pill('issued', 'amber') : null,
         el('span', { class: 'saving', id: 'save-state' }),
         // An export is a document being sent to somebody, so it is plain by
         // default. The working copy keeps the editing colours for anyone who
         // wants the file to look like the screen they typed it into.
-        button('Export .xlsx', {
-          title: 'The issued document: neutral print styling, no editing colours',
-          on: { click: () => download(`/api/schedules/${view.id}/export.xlsx`) },
-        }),
         button('Working copy', {
           title: 'The same numbers, with the editing colours kept',
           on: {
             click: () => download(`/api/schedules/${view.id}/export.xlsx?theme=editor`),
           },
+        }),
+        // Whichever deliverable this machine can produce is the primary action:
+        // without LibreOffice there was no primary button on the page at all.
+        button('Export .xlsx', {
+          class: store.pdfAvailable ? 'btn' : 'btn btn-primary',
+          title: 'The issued document: neutral print styling, no editing colours',
+          on: { click: () => download(`/api/schedules/${view.id}/export.xlsx`) },
         }),
         store.pdfAvailable
           ? button('Export PDF', {
@@ -130,8 +141,8 @@ function draw() {
               on: { click: () => download(`/api/schedules/${view.id}/export.pdf`) },
             })
           : null,
-      ]),
-    ]),
+      ]
+    ),
     el('div', { class: 'tabs' }, [
       ['schedule', `Schedule (${view.grid.rows.length})`],
       ['revisions', `Revisions (${view.revisions.length})`],
@@ -235,8 +246,9 @@ function drawGrid(root) {
   root.appendChild(sheet);
   root.appendChild(el('div', { class: 'sheet-hint', style: 'margin-top:8px' }, [
     'Arrows move, Enter goes down, Tab goes right. Shift+arrows or a drag select a ' +
-    'block; Ctrl+C and Ctrl+V copy and paste one. Delete clears the selection, ' +
-    'Ctrl+D fills it down, Ctrl+Z undoes.',
+    'block; Ctrl+C and Ctrl+V copy and paste one. Drag the small square at the corner ' +
+    'of the selection to fill — a reference ending in digits counts up, and holding ' +
+    'Ctrl copies instead. Delete clears the selection, Ctrl+D fills it down, Ctrl+Z undoes.',
   ]));
 
   renderTypeDrift(root);
@@ -268,55 +280,429 @@ function renderTypeDrift(root) {
   ]));
 }
 
-function gridToolbar() {
-  const history = view.grid.history || {};
-  const selectedRowCount = sel ? size(sel).rows : 0;
+/**
+ * The grid's toolbar. Built once per redraw, then updated in place.
+ *
+ * In place is the whole point. It used to be rebuilt whenever the selection
+ * moved, and a save triggered by the caret leaving a cell moves the selection —
+ * so clicking Fill down with the caret still in a cell replaced the button
+ * between the mousedown and the mouseup, the click never landed on anything,
+ * and the first press of every toolbar button silently did nothing. Mutating
+ * the labels a node already has cannot do that.
+ */
+let toolbarNodes = null;
 
-  return el('div', { class: 'sheet-toolbar' }, [
-    button('Add row', { class: 'btn btn-primary', on: { click: () => addRow() } }),
-    button('Duplicate row', {
+function gridToolbar() {
+  const rowCount = el('input', {
+    type: 'number', min: '1', max: '500', value: '1', class: 'row-count',
+    title: 'How many rows to add',
+    on: {
+      input: () => refreshToolbar(),
+      keydown: (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); addRows(); }
+      },
+    },
+  });
+
+  const nodes = {
+    rowCount,
+    add: button('Add row', {
+      class: 'btn btn-primary',
+      title: 'Add a row at the end. Type a number beside it to add several.',
+      on: { click: () => addRows() },
+    }),
+    duplicate: button('Duplicate', {
       title: 'Copy the selected row and insert it below',
       on: { click: duplicateSelected },
     }),
-    button(selectedRowCount > 1 ? `Delete ${selectedRowCount} rows` : 'Delete row', {
+    remove: button('Delete row', {
       class: 'btn btn-danger',
       title: 'Remove the selected rows. Undoable.',
       on: { click: deleteSelectedRows },
     }),
-    el('span', { class: 'toolbar-gap' }),
-    button('Fill down', {
-      title: 'Copy the top cell of the selection into the rest of it (Ctrl+D)',
+    fillDown: button('Fill down', {
+      title: 'Copy the top cell of the selection into the rest of it (Ctrl+D). ' +
+        'Or drag the small square at the corner of the selection.',
       on: { click: () => fillSelection('copy') },
     }),
-    button('Fill series', {
+    fillSeries: button('Fill series', {
       title: 'Count up from the top of the selection, e.g. RAD-001, RAD-002, RAD-003',
       on: { click: () => fillSelection('series') },
     }),
-    button('Paste rows…', { on: { click: pasteRows } }),
-    el('span', { class: 'toolbar-gap' }),
-    button('Undo', {
-      class: 'btn',
-      disabled: !history.can_undo,
-      title: history.can_undo ? `Undo ${history.undo_label} (Ctrl+Z)` : 'Nothing to undo',
-      on: { click: undoEdit },
+    pasteRows: button('Paste rows…', { on: { click: pasteRows } }),
+    workbook: button('Excel…', {
+      title: 'Take this schedule out as a spreadsheet, fill it in, and bring it back',
+      on: { click: workbookDialog },
     }),
-    button('Redo', {
-      class: 'btn',
-      disabled: !history.can_redo,
-      title: history.can_redo ? `Redo ${history.redo_label}` : 'Nothing to redo',
-      on: { click: redoEdit },
+    override: button('Override cell', { on: { click: overrideSelection } }),
+    restore: button('Restore from library', { on: { click: restoreSelection } }),
+    undo: button('Undo', { on: { click: undoEdit } }),
+    redo: button('Redo', { on: { click: redoEdit } }),
+    columns: button('Columns…', {
+      title: 'Which columns show here, on the Excel export and on the PDF',
+      on: { click: columnsDialog },
     }),
-    el('div', { class: 'legend', style: 'margin-left:auto' }, [
+  };
+  toolbarNodes = nodes;
+
+  const bar = toolbar([
+    ['Rows', [
+      el('div', { class: 'add-rows' }, [nodes.add, rowCount]),
+      nodes.duplicate,
+      nodes.remove,
+    ]],
+    ['Fill', [nodes.fillDown, nodes.fillSeries, nodes.pasteRows, nodes.workbook]],
+    ['Equipment library', [nodes.override, nodes.restore]],
+    ['History', [nodes.undo, nodes.redo]],
+  ], [
+    nodes.columns,
+    el('div', { class: 'legend' }, [
       el('span', {}, [el('span', { class: 'swatch swatch-input' }), 'you type']),
-      el('span', {}, [el('span', { class: 'swatch swatch-library' }), 'from the equipment library']),
+      el('span', {}, [el('span', { class: 'swatch swatch-library' }), 'library']),
       el('span', {}, [el('span', { class: 'swatch swatch-derived' }), 'calculated']),
     ]),
   ]);
+  refreshToolbar();
+  return bar;
 }
 
+/** Bring the toolbar's labels and enabled states up to date. Replaces nothing. */
 function refreshToolbar() {
-  const existing = document.querySelector('.sheet-toolbar');
-  if (existing) existing.replaceWith(gridToolbar());
+  const nodes = toolbarNodes;
+  if (!nodes || !nodes.add.isConnected) return;
+
+  const history = view.grid.history || {};
+  const selectedRowCount = sel ? size(sel).rows : 0;
+  const libraryCells = selectedLibraryCells();
+  const overridable = libraryCells.reduce((n, e) => n + e.keys.length, 0);
+  const overridden = libraryCells.reduce(
+    (n, e) => n + e.keys.filter((k) => isOverridden(e.row, k)).length, 0
+  );
+
+  const wanted = Math.max(1, Number(nodes.rowCount.value) || 1);
+  nodes.add.textContent = wanted > 1 ? `Add ${wanted} rows` : 'Add row';
+
+  nodes.remove.textContent =
+    selectedRowCount > 1 ? `Delete ${selectedRowCount} rows` : 'Delete row';
+
+  nodes.override.textContent =
+    overridable > 1 ? `Override ${overridable} cells` : 'Override cell';
+  nodes.override.disabled = !overridable;
+  nodes.override.title = overridable
+    ? 'Take every library cell in the selection over, so this schedule can say ' +
+      'something different from the library'
+    : 'Select one or more library (green) cells first';
+
+  nodes.restore.disabled = !overridden;
+  nodes.restore.title = overridden
+    ? `Put ${overridden} overridden cell(s) back on the library value`
+    : 'Nothing in the selection is overridden';
+
+  nodes.undo.disabled = !history.can_undo;
+  nodes.undo.title = history.can_undo
+    ? `Undo ${history.undo_label} (Ctrl+Z)` : 'Nothing to undo';
+  nodes.redo.disabled = !history.can_redo;
+  nodes.redo.title = history.can_redo
+    ? `Redo ${history.redo_label}` : 'Nothing to redo';
+}
+
+/** The library cells the selection covers, grouped by row. */
+function selectedLibraryCells() {
+  if (!sel) return [];
+  const out = [];
+  for (const r of selectedRows(sel)) {
+    const row = rowAt(r);
+    if (!row) continue;
+    const keys = [];
+    for (const c of selectedColumns(sel)) {
+      const column = columnAt(c);
+      if (column && column.kind === 'library') keys.push(column.legacy_name);
+    }
+    if (keys.length) out.push({ row, keys });
+  }
+  return out;
+}
+
+/* ---------------------------------------------------- library overrides --- */
+
+/**
+ * Take every library cell in the selection over at once.
+ *
+ * A row that diverges from the library usually diverges in company: the same
+ * unit at a different duty is a block of cells, not one. Doing them one pencil
+ * at a time is the difference between a feature somebody uses and one they work
+ * around by typing the value into the notes.
+ */
+async function overrideSelection() {
+  const entries = selectedLibraryCells();
+  if (!entries.length) {
+    toast('Select one or more library cells first', 'err');
+    return;
+  }
+
+  const edits = [];
+  let count = 0;
+  for (const { row, keys } of entries) {
+    const overrides = {};
+    for (const key of keys) {
+      if (isOverridden(row, key)) continue;
+      const current = row.computed[key];
+      // An empty override is how a cell is put back on the library, so a cell
+      // with nothing to carry over would undo itself the moment it was saved.
+      if (current === null || current === undefined || current === '') continue;
+      overrides[key] = current;
+      count += 1;
+    }
+    if (Object.keys(overrides).length) edits.push({ row_id: row.id, values: {}, overrides });
+  }
+
+  if (!edits.length) {
+    toast('Those cells have no library value to take over yet', 'err');
+    return;
+  }
+
+  try {
+    view.grid = await api.schedules.editCells(view.id, edits, 'override_cells');
+    redrawPreservingFocus();
+    toast(`${count} cell(s) taken over — type over them, or ↺ to restore`, 'ok');
+  } catch (error) { fail(error); }
+}
+
+/** Put every overridden cell in the selection back on the library value. */
+async function restoreSelection() {
+  const entries = selectedLibraryCells();
+  const edits = [];
+  let count = 0;
+  for (const { row, keys } of entries) {
+    const overrides = {};
+    for (const key of keys) {
+      if (!isOverridden(row, key)) continue;
+      overrides[key] = '';
+      draftOverrides.delete(cellKey(row.id, key));
+      count += 1;
+    }
+    if (Object.keys(overrides).length) edits.push({ row_id: row.id, values: {}, overrides });
+  }
+  if (!edits.length) {
+    toast('Nothing in the selection is overridden', 'err');
+    return;
+  }
+  try {
+    view.grid = await api.schedules.editCells(view.id, edits, 'restore_cells');
+    redrawPreservingFocus();
+    toast(`${count} cell(s) back on the library value — Ctrl+Z to undo`, 'ok');
+  } catch (error) { fail(error); }
+}
+
+/* ------------------------------------------------- the schedule workbook --- */
+
+/**
+ * Take the schedule out as a spreadsheet, fill it in, bring it back.
+ *
+ * The other export is the deliverable — cover, revision page, calculated
+ * columns and all. This is the working file: the columns somebody types into,
+ * with the headings on row 1. Filling in a hundred rows is quicker where the
+ * fill handle and the keyboard are already familiar, and there is no reason the
+ * tool should insist otherwise.
+ *
+ * Product and calculated columns are not in it. One is looked up and the other
+ * is worked out, so a filled-in copy of either would be a stale copy of
+ * something the schedule already knows.
+ */
+async function workbookDialog() {
+  const picker = el('input', { type: 'file', accept: '.xlsx,.xlsm' });
+  const mode = select(
+    [
+      ['append', 'Add to the end (safe)'],
+      ['replace', 'Replace every row'],
+    ],
+    'append'
+  );
+  const summary = el('div');
+  let plan = null;
+
+  const refresh = async () => {
+    const file = picker.files && picker.files[0];
+    if (!file) { clear(summary); plan = null; return; }
+    clear(summary).appendChild(el('div', { class: 'muted', text: 'Reading the workbook…' }));
+    try {
+      plan = await api.schedules.importRows(view.id, file, { mode: mode.value });
+      clear(summary).appendChild(renderPastePlan(plan));
+    } catch (error) {
+      plan = null;
+      clear(summary).appendChild(notice(error.message, 'error'));
+    }
+  };
+  picker.addEventListener('change', refresh);
+  mode.addEventListener('change', refresh);
+
+  const ok = await modal({
+    title: 'This schedule in Excel',
+    wide: true,
+    render: () => el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'The columns you type into, with the headings on row 1. Product and calculated ',
+        'columns are left out — one is looked up from the equipment library and the other ',
+        'is worked out, so filling them in here would be filling in a copy.',
+      ]),
+      el('div', { class: 'btn-row', style: 'margin-bottom:14px' }, [
+        button('Download this schedule', {
+          title: 'What is on it now, ready to edit',
+          on: { click: () => download(api.schedules.rowsUrl(view.id, true)) },
+        }),
+        button('Blank workbook', {
+          title: 'The same headings with nothing under them',
+          on: { click: () => download(api.schedules.rowsUrl(view.id, false)) },
+        }),
+      ]),
+      field('Bring one back', picker),
+      el('div', { style: 'margin-top:12px' }, [
+        field(
+          'Where',
+          mode,
+          'A file you exported from this schedule and corrected comes back as a ' +
+          'replacement. Adding to the end is for rows that are new.'
+        ),
+      ]),
+      summary,
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button('Import', { class: 'btn btn-primary', on: { click: () => close(true) } }),
+    ],
+  });
+  if (!ok || !plan) return;
+
+  if (!plan.detected_rows) {
+    toast('No rows were found in that workbook', 'err');
+    return;
+  }
+  if (plan.destructive) {
+    const confirmed = await confirmDialog({
+      title: 'Replace every row?',
+      message:
+        `${plan.populated_removed} filled-in row(s) will be removed and replaced with the ` +
+        `${plan.detected_rows} row(s) in the workbook.`,
+      confirmLabel: 'Replace rows',
+      danger: true,
+      detail: el('p', { class: 'muted tiny' }, ['This can be undone with Ctrl+Z.']),
+    });
+    if (!confirmed) return;
+  }
+
+  try {
+    const applied = await api.schedules.importRows(view.id, picker.files[0], {
+      mode: mode.value, apply: true, confirm: true,
+    });
+    view.grid = applied.grid;
+    sel = null;
+    draw();
+    toast(`${applied.applied} row(s) brought in — Ctrl+Z to undo`, 'ok');
+  } catch (error) { fail(error); }
+}
+
+/* -------------------------------------------------------------- columns --- */
+
+/**
+ * Which columns this schedule shows, and where.
+ *
+ * Three answers per column rather than one: a price belongs on the screen and
+ * in the working file and not on the copy that goes to the client. Which
+ * columns cannot be hidden comes from the server, so the screen cannot offer a
+ * switch that would produce a workbook with a broken reference in it.
+ */
+async function columnsDialog() {
+  let data;
+  try {
+    data = await api.schedules.columns(view.id);
+  } catch (error) { fail(error); return; }
+
+  const LABELS = { editor: 'On screen', xlsx: 'Excel', pdf: 'PDF' };
+  const SHOW_ALL = {
+    editor: 'Show all on screen', xlsx: 'Show all in Excel', pdf: 'Show all in PDF',
+  };
+  const boxes = new Map();
+
+  const rows = data.columns.map((column) => {
+    const cells = data.targets.map((target) => {
+      const box = el('input', {
+        type: 'checkbox',
+        checked: column.visibility[target] !== false,
+        disabled: !column.hideable,
+      });
+      boxes.set(`${column.legacy_name}|${target}`, box);
+      return el('td', { class: 'tick' }, [box]);
+    });
+    return el('tr', {}, [
+      el('td', {}, [
+        el('div', {}, [column.name]),
+        el('div', { class: 'muted tiny' }, [
+          column.unit ? `${column.unit} · ` : '',
+          column.kind,
+          column.reason ? ` · ${column.reason}` : '',
+        ]),
+      ]),
+      ...cells,
+    ]);
+  });
+
+  const setColumn = (target, shown) => {
+    for (const column of data.columns) {
+      if (!column.hideable) continue;
+      const box = boxes.get(`${column.legacy_name}|${target}`);
+      if (box) box.checked = shown;
+    }
+  };
+
+  const ok = await modal({
+    title: 'Columns on this schedule',
+    wide: true,
+    render: () => el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'Hiding a column here changes this schedule only — the equipment type and every ' +
+        'other schedule built from it are untouched. The values are still stored; they ' +
+        'are simply not printed.',
+      ]),
+      el('div', { class: 'btn-row', style: 'margin-bottom:10px' }, data.targets.map((t) =>
+        button(SHOW_ALL[t], { class: 'btn btn-sm', on: { click: () => setColumn(t, true) } })
+      )),
+      table(['Column', ...data.targets.map((t) => LABELS[t])], rows),
+      el('p', { class: 'muted tiny', style: 'margin-top:10px' }, [
+        'The Model Reference and any column a calculation reads cannot be hidden: the ' +
+        'workbook would come out with a broken reference in it.',
+      ]),
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button('Save', { class: 'btn btn-primary', on: { click: () => close(true) } }),
+    ],
+  });
+  if (!ok) return;
+
+  const payload = {};
+  for (const column of data.columns) {
+    if (!column.hideable) continue;
+    const hidden = {};
+    for (const target of data.targets) {
+      const box = boxes.get(`${column.legacy_name}|${target}`);
+      if (box && !box.checked) hidden[target] = false;
+    }
+    if (Object.keys(hidden).length) payload[column.legacy_name] = hidden;
+  }
+
+  try {
+    await api.schedules.setColumns(view.id, payload);
+    const hiddenCount = Object.keys(payload).length;
+    view.grid = await api.schedules.grid(view.id);
+    sel = null;
+    draw();
+    toast(
+      hiddenCount
+        ? `${hiddenCount} column(s) hidden somewhere`
+        : 'Every column shows everywhere',
+      'ok'
+    );
+  } catch (error) { fail(error); }
 }
 
 function renderProblemSummary(root) {
@@ -531,16 +917,198 @@ function renderEditableCell(row, column, key) {
   return td;
 }
 
+/* ---------------------------------------------------------- suggestions --- */
+
+/** What this schedule already says in one column. */
+function suggestionsFor(key) {
+  return (view.grid.suggestions || {})[key] || { values: [], counts: {}, next: null };
+}
+
+/**
+ * The one value in this column that starts with what has been typed.
+ *
+ * One, deliberately. Two candidates means completing would be a guess, and a
+ * guess that lands in a schedule is worse than the four keystrokes it saved.
+ * Numbers are left alone: a duty of 4 is not the start of 450.
+ */
+function completionFor(key, typed) {
+  const text = String(typed || '');
+  if (text.length < 1 || /^[\d.,-]+$/.test(text)) return null;
+  const lower = text.toLowerCase();
+  const matches = suggestionsFor(key).values.filter(
+    (v) => v.toLowerCase().startsWith(lower) && v.length > text.length
+  );
+  // Values differing only in case are the same suggestion, not two.
+  const distinct = [...new Set(matches.map((v) => v.toLowerCase()))];
+  return distinct.length === 1 ? matches[0] : null;
+}
+
+/**
+ * The reference this row would get if nobody typed one.
+ *
+ * Shown as a placeholder on the last empty cell of a column that counts, and
+ * taken by pressing Tab or Enter — so adding a row to a schedule of MVHR-005
+ * is one keystroke rather than eight.
+ */
+function nextValueFor(row, key) {
+  const suggestion = suggestionsFor(key).next;
+  if (!suggestion) return null;
+  if ((row.values[key] ?? '') !== '') return null;
+
+  // On exactly one row: the first empty one after the last that has a value.
+  // Offering MVHR-006 on every empty row would be offering to make five
+  // duplicates, and offering it in a gap halfway up would make one.
+  const rows = view.grid.rows;
+  let lastFilled = -1;
+  rows.forEach((r, i) => {
+    if (String(r.values[key] ?? '').trim() !== '') lastFilled = i;
+  });
+  const target = rows[lastFilled + 1];
+  return target && target.id === row.id ? suggestion : null;
+}
+
+/**
+ * Complete what is being typed, inline, the way an address bar does.
+ *
+ * The completion goes in as selected text, so carrying on typing replaces it
+ * and Backspace removes it. Nothing is committed until the cell is left, which
+ * is what makes it safe to be wrong.
+ */
+function applyCompletion(box, key) {
+  const typed = box.value;
+  if (box.selectionStart !== typed.length) return;  // mid-word editing
+  const completion = completionFor(key, typed);
+  if (!completion) return;
+  box.value = completion;
+  box.setSelectionRange(typed.length, completion.length);
+}
+
 function cellInput(row, key, attrs = {}) {
-  return input(row.values[key] ?? '', {
+  const box = input(row.values[key] ?? '', {
     ...attrs,
     on: {
-      input: () => onType(row, key),
-      blur: () => flushRow(row),
+      input: (event) => {
+        // Only when adding to the end: deleting must not re-complete what was
+        // just deleted, which would make Backspace impossible.
+        const typing = !event.inputType || !event.inputType.startsWith('delete');
+        onType(row, key);
+        if (typing) applyCompletion(box, key);
+      },
+      blur: async () => {
+        await flushRow(row);
+        offerGroupFill(row, key);
+      },
       focus: () => focusFromCell(row.id, key),
       ...(attrs.on || {}),
     },
   });
+
+  const suggestion = nextValueFor(row, key);
+  if (suggestion) {
+    box.placeholder = suggestion;
+    box.dataset.suggest = suggestion;
+  }
+  return box;
+}
+
+/* ------------------------------------------------------- the group offer --- */
+
+/**
+ * Offers already turned down, so the same one is not made twice.
+ *
+ * Keyed by the column and the value. A suggestion that keeps coming back after
+ * being dismissed stops being help and becomes something to click past.
+ */
+const declinedOffers = new Set();
+
+/** Chips are one at a time; a second would be two things asking at once. */
+let groupChip = null;
+
+function dismissGroupChip() {
+  if (groupChip) { groupChip.remove(); groupChip = null; }
+}
+
+/**
+ * "The other twelve Cupboards have no airflow. Set them to 28 as well?"
+ *
+ * A hundred flats hold the same unit at the same duty, and typing it a hundred
+ * times is why somebody builds the schedule in Excel instead. The offer is
+ * deliberately narrow, because a wrong bulk edit costs far more than it saves:
+ *
+ * - only cells that are **empty**, never one somebody has already answered;
+ * - only where **two or more** rows share the grouping value, so a one-off is
+ *   not treated as a pattern;
+ * - only the grouping column that matches **most** rows, and never a column
+ *   whose values are unique, which self-excludes references;
+ * - once. Turn it down and it stays down for that column and value.
+ */
+function offerGroupFill(row, key) {
+  dismissGroupChip();
+  const column = view.grid.columns.find((c) => c.legacy_name === key);
+  if (!column || !column.editable) return;
+
+  const value = String(row.values[key] ?? '').trim();
+  if (!value) return;
+  if (declinedOffers.has(`${key}=${value}`)) return;
+
+  let best = null;
+  for (const other of view.grid.columns) {
+    if (!other.editable || other.legacy_name === key) continue;
+    const groupValue = String(row.values[other.legacy_name] ?? '').trim();
+    if (!groupValue) continue;
+
+    const targets = view.grid.rows.filter((r) =>
+      r.id !== row.id
+      && String(r.values[other.legacy_name] ?? '').trim().toLowerCase()
+         === groupValue.toLowerCase()
+      && String(r.values[key] ?? '').trim() === ''
+    );
+    if (targets.length >= 2 && (!best || targets.length > best.targets.length)) {
+      best = { column: other, groupValue, targets };
+    }
+  }
+  if (!best) return;
+
+  showGroupChip(row, key, value, best);
+}
+
+function showGroupChip(row, key, value, match) {
+  const entry = cellIndex.get(cellKey(row.id, key));
+  if (!entry) return;
+  const column = view.grid.columns.find((c) => c.legacy_name === key);
+
+  const apply = async () => {
+    dismissGroupChip();
+    const edits = match.targets.map((r) => ({ row_id: r.id, values: { [key]: value } }));
+    try {
+      view.grid = await api.schedules.editCells(view.id, edits, 'group_fill');
+      redrawPreservingFocus();
+      toast(`${edits.length} row(s) set to ${value} — Ctrl+Z to undo`, 'ok');
+    } catch (error) { fail(error); }
+  };
+
+  const chip = el('div', { class: 'fill-chip group-chip' }, [
+    el('span', { class: 'tiny' }, [
+      `${match.targets.length} other row(s) with ${match.column.name} `,
+      el('strong', { text: match.groupValue }),
+      ` have no ${column.name}.`,
+    ]),
+    button(`Set them to ${value}`, { class: 'btn btn-sm btn-primary', on: { click: apply } }),
+    el('button', {
+      class: 'icon-btn',
+      title: 'Not this time',
+      on: {
+        click: () => { declinedOffers.add(`${key}=${value}`); dismissGroupChip(); },
+      },
+    }, ['×']),
+  ]);
+
+  const box = entry.td.getBoundingClientRect();
+  chip.style.top = `${box.bottom + 4}px`;
+  chip.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - 420))}px`;
+  document.body.appendChild(chip);
+  groupChip = chip;
+  setTimeout(() => { if (groupChip === chip) dismissGroupChip(); }, 12000);
 }
 
 /* ------------------------------------------------------------ selection --- */
@@ -549,10 +1117,18 @@ function cellInput(row, key, attrs = {}) {
 function focusFromCell(rowId, key) {
   const entry = cellIndex.get(cellKey(rowId, key));
   if (!entry) return;
-  if (!sel || sel.focus.r !== entry.r || sel.focus.c !== entry.c) {
-    sel = cellSelection(entry.r, entry.c);
-    paintSelection();
+  // A cell inside the selected block is the caret moving within it, not a new
+  // selection: collapsing here would undo a block the moment it was typed into.
+  if (sel && contains(sel, entry.r, entry.c)) {
+    const caret = activeCell(sel);
+    if (caret.r !== entry.r || caret.c !== entry.c) {
+      sel = withActive(sel, { r: entry.r, c: entry.c });
+      paintSelection();
+    }
+    return;
   }
+  sel = cellSelection(entry.r, entry.c);
+  paintSelection();
 }
 
 function cellNode(r, c) {
@@ -565,16 +1141,20 @@ function cellNode(r, c) {
 
 function paintSelection() {
   for (const { td } of cellIndex.values()) {
-    td.classList.remove('sel', 'sel-focus');
+    td.classList.remove('sel', 'sel-focus', 'fill-preview');
   }
+  document.querySelectorAll('.fill-handle').forEach((n) => n.remove());
   if (!sel) { refreshToolbar(); return; }
   const box = bounds(sel);
   for (const { r, c } of selectedCells(sel)) {
     const node = cellNode(r, c);
     if (node) node.classList.add('sel');
   }
-  const focused = cellNode(sel.focus.r, sel.focus.c);
+  const caret = activeCell(sel);
+  const focused = cellNode(caret.r, caret.c);
   if (focused) focused.classList.add('sel-focus');
+  paintFillPreview();
+  attachFillHandle(box);
   // The row numbers show the extent too, so a tall selection is obvious even
   // when the top of it has scrolled away.
   document.querySelectorAll('.sheet tbody tr').forEach((tr, index) => {
@@ -609,6 +1189,8 @@ function cellFromEvent(event) {
 
 function onMouseDown(event) {
   if (event.button !== 0) return;
+  dismissFillChip();
+  dismissGroupChip();
   const cell = cellFromEvent(event);
   if (!cell) return;
 
@@ -616,7 +1198,9 @@ function onMouseDown(event) {
     // Shift+click extends from wherever the selection started, as it does in a
     // spreadsheet, rather than starting a new one.
     event.preventDefault();
-    sel = sel ? { anchor: sel.anchor, focus: cell } : cellSelection(cell.r, cell.c);
+    sel = sel
+      ? { anchor: sel.anchor, focus: cell, active: { ...activeCell(sel) } }
+      : cellSelection(cell.r, cell.c);
     paintSelection();
     return;
   }
@@ -641,11 +1225,18 @@ function onRowNumberDown(event, index) {
 }
 
 function onMouseOver(event) {
+  if (fillDrag) {
+    const cell = cellFromEvent(event);
+    if (!cell || cell.r === fillDrag.to) return;
+    fillDrag.to = cell.r;
+    paintFillPreview();
+    return;
+  }
   if (!dragging || !sel) return;
   const cell = cellFromEvent(event);
   if (!cell) return;
-  if (cell.r === sel.focus.r && cell.c === sel.focus.c) return;
-  sel = { anchor: sel.anchor, focus: cell };
+  if (cell.r === sel.focus.r && cell.c === sel.focus.c) return;  // the drag has not moved
+  sel = { anchor: sel.anchor, focus: cell, active: { ...activeCell(sel) } };
   paintSelection();
 }
 
@@ -653,11 +1244,205 @@ function endDrag() {
   dragging = false;
 }
 
+/* ----------------------------------------------------------- fill handle --- */
+
+/**
+ * The small square at the corner of the selection, dragged to fill.
+ *
+ * This is the one spreadsheet gesture the grid was missing, and its absence is
+ * why typing RAD-001 and dragging it down — the single most common thing anyone
+ * does on a schedule — meant finding a button in a toolbar instead. Dragging it
+ * counts up where the value ends in digits, as Excel does; holding Ctrl copies
+ * instead, and the chip that appears afterwards offers the other one.
+ */
+function attachFillHandle(box) {
+  const corner = cellNode(box.bottom, box.right);
+  if (!corner) return;
+  corner.appendChild(el('div', {
+    class: 'fill-handle',
+    title: 'Drag to fill. Counts up from a reference ending in digits; hold Ctrl to copy.',
+    on: { mousedown: (event) => startFillDrag(event, box) },
+  }));
+}
+
+function startFillDrag(event, box) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  fillDrag = { box, to: box.bottom, copy: event.ctrlKey || event.metaKey };
+  dismissFillChip();
+  document.addEventListener('mouseup', endFillDrag, { once: true });
+}
+
+function paintFillPreview() {
+  for (const { td } of cellIndex.values()) td.classList.remove('fill-preview');
+  if (!fillDrag) return;
+  const { box, to } = fillDrag;
+  const top = Math.min(to, box.top);
+  const bottom = Math.max(to, box.bottom);
+  for (let r = top; r <= bottom; r += 1) {
+    if (r >= box.top && r <= box.bottom) continue;
+    for (let c = box.left; c <= box.right; c += 1) {
+      const node = cellNode(r, c);
+      if (node) node.classList.add('fill-preview');
+    }
+  }
+}
+
+async function endFillDrag(event) {
+  const drag = fillDrag;
+  fillDrag = null;
+  if (!drag) return;
+  paintFillPreview();
+  const copy = drag.copy || event.ctrlKey || event.metaKey;
+
+  const down = drag.to > drag.box.bottom;
+  const count = down ? drag.to - drag.box.bottom : drag.box.top - drag.to;
+  if (count <= 0) { paintSelection(); return; }
+
+  // Down fills from the bottom row of the selection, up from the top: the seed
+  // is whichever end the drag started away from, as it is in a spreadsheet.
+  const seedIndex = down ? drag.box.bottom : drag.box.top;
+  await runFill({
+    seedIndex,
+    left: drag.box.left,
+    right: drag.box.right,
+    count,
+    direction: down ? 'down' : 'up',
+    mode: copy ? 'copy' : 'series',
+  });
+}
+
+/** Carry out one fill, and leave the chip that offers the other mode. */
+async function runFill(request) {
+  const seed = rowAt(request.seedIndex);
+  if (!seed) return;
+
+  const columns = [];
+  for (let c = request.left; c <= request.right; c += 1) {
+    const column = columnAt(c);
+    if (column && column.editable) columns.push(column.legacy_name);
+  }
+  if (!columns.length) {
+    toast('Those columns are calculated or looked up, so they cannot be filled', 'err');
+    paintSelection();
+    return;
+  }
+
+  try {
+    await flushRow(seed);
+    view.grid = await api.schedules.fill(view.id, {
+      columns,
+      start_position: seed.position,
+      count: request.count,
+      mode: request.mode,
+      direction: request.direction,
+      // Null lets the server work out which number counts from the cells that
+      // are already filled. A value here is somebody overruling that from the
+      // chip, so it has to travel.
+      index: request.index ?? null,
+    });
+    toast(
+      request.mode === 'series'
+        ? `Filled ${request.count} row(s), counting up`
+        : `Copied into ${request.count} row(s)`,
+      'ok'
+    );
+    // Extend the selection over what was just filled, as a spreadsheet does.
+    const far = request.direction === 'down'
+      ? request.seedIndex + request.count
+      : request.seedIndex - request.count;
+    sel = { anchor: { r: request.seedIndex, c: request.left }, focus: { r: far, c: request.right } };
+    redrawPreservingFocus();
+    showFillChip(far, request);
+  } catch (error) { fail(error); }
+}
+
+let fillChip = null;
+
+function dismissFillChip() {
+  if (fillChip) { fillChip.remove(); fillChip = null; }
+}
+
+/**
+ * Excel's autofill options button, in the one form that earns its place.
+ *
+ * "Usually a series, but give me the option" is exactly what this is: the fill
+ * has already happened the way it usually should, and changing your mind is one
+ * click rather than an undo and a different button.
+ */
+function showFillChip(atRow, request) {
+  dismissFillChip();
+  const anchor = cellNode(atRow, request.right);
+  if (!anchor) return;
+
+  const other = request.mode === 'series' ? 'copy' : 'series';
+  const label = other === 'copy' ? 'Copy the same value instead' : 'Count up instead';
+
+  // How many numbers the seed holds. With more than one, which of them counts
+  // is a real question — 'RM0.01 2 Bedroom' could mean the room or the beds —
+  // and the honest place to settle it is here, having seen what happened.
+  const seedRow = rowAt(request.seedIndex);
+  const seedColumn = columnAt(request.left);
+  const seedValue = seedRow && seedColumn
+    ? String(seedRow.values[seedColumn.legacy_name] ?? '') : '';
+  const numbers = seedValue.match(/\d+/g) || [];
+  const canChoose = request.mode === 'series' && numbers.length > 1;
+
+  const chip = el('div', { class: 'fill-chip' }, [
+    el('span', {
+      class: 'tiny',
+      text: request.mode === 'series' ? 'Counted up' : 'Copied down',
+    }),
+    el('button', {
+      class: 'btn btn-sm',
+      on: {
+        click: async () => {
+          dismissFillChip();
+          await runFill({ ...request, mode: other });
+        },
+      },
+    }, [label]),
+    canChoose
+      ? button('Count a different number', {
+          class: 'btn btn-sm',
+          title: `This value holds ${numbers.length} numbers: ${numbers.join(', ')}`,
+          on: {
+            click: async () => {
+              dismissFillChip();
+              // Walk the runs leftwards from the last, which is the default.
+              const current = request.index ?? -1;
+              const at = current < 0 ? numbers.length + current : current;
+              const next = (at - 1 + numbers.length) % numbers.length;
+              await runFill({ ...request, index: next });
+            },
+          },
+        })
+      : null,
+  ]);
+
+  const box = anchor.getBoundingClientRect();
+  chip.style.top = `${box.bottom + 4}px`;
+  chip.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - 260))}px`;
+  document.body.appendChild(chip);
+  fillChip = chip;
+  setTimeout(() => { if (fillChip === chip) dismissFillChip(); }, 8000);
+}
+
 /* ------------------------------------------------------------- keyboard --- */
 
 function onGridKeyDown(event) {
   if (!sel) return;
   const box = event.target.tagName === 'INPUT' ? event.target : null;
+
+  // Tab or Enter on an empty cell takes the reference being offered. Only when
+  // it is empty: a suggestion must never overwrite something somebody typed.
+  if (box && (event.key === 'Tab' || event.key === 'Enter') && box.value === ''
+      && box.dataset.suggest) {
+    box.value = box.dataset.suggest;
+    delete box.dataset.suggest;
+    box.dispatchEvent(new Event('input', { bubbles: false }));
+  }
   const action = decide(event, {
     editing: Boolean(box),
     atStart: box ? box.selectionStart === 0 && box.selectionEnd === 0 : true,
@@ -684,6 +1469,12 @@ function onGridKeyDown(event) {
     }
     case 'step': {
       event.preventDefault();
+      // Tab walks a selected block too, in the same order, so Tab and Enter do
+      // not disagree about what the selection is for.
+      if (!isSingleCell(sel)) {
+        stepInsideSelection(action.dc);
+        return;
+      }
       if (tabAnchor === null && action.dc > 0) tabAnchor = sel.focus.c;
       const next = stepTypeable(action.dc);
       if (next) focusCell(next.r, next.c);
@@ -691,6 +1482,13 @@ function onGridKeyDown(event) {
     }
     case 'enter': {
       event.preventDefault();
+      // With a block selected, Enter walks the block: across the row, then down
+      // to the start of the next, wrapping at the end. Filling in a chosen
+      // rectangle is then typing and Enter, without steering.
+      if (!isSingleCell(sel)) {
+        stepInsideSelection(1);
+        return;
+      }
       const column = tabAnchor === null ? sel.focus.c : tabAnchor;
       if (sel.focus.r + 1 < view.grid.rows.length) {
         focusCell(sel.focus.r + 1, column);
@@ -728,11 +1526,30 @@ function onGridKeyDown(event) {
       redoEdit();
       return;
     case 'escape':
-      if (sel) { sel = cellSelection(sel.focus.r, sel.focus.c); paintSelection(); }
+      if (sel) {
+        const caret = activeCell(sel);
+        sel = cellSelection(caret.r, caret.c);
+        paintSelection();
+      }
       return;
     default:
       // 'copy' and 'paste' arrive as clipboard events too, which carry the data.
   }
+}
+
+/**
+ * Move the caret one cell along inside the selected block, keeping the block.
+ *
+ * The block is anchor-to-focus, so moving the focus would shrink the very
+ * rectangle being walked. The caret is carried separately for exactly this.
+ */
+function stepInsideSelection(step) {
+  const next = nextInRange(sel, step);
+  if (!next) return;
+  const block = sel;
+  focusCell(next.r, next.c, { select: true });
+  sel = withActive(block, next);
+  paintSelection();
 }
 
 /** Tab steps between cells somebody can type into, skipping calculated ones. */
@@ -807,6 +1624,9 @@ async function applyBlockPaste(matrix) {
     columns: view.grid.columns,
     top: box.top,
     left: box.left,
+    // The rectangle the paste was aimed at, so a smaller block repeats to fill
+    // it rather than writing one cell into a selection of eight.
+    selection: box,
   });
 
   if (!plan.edits.length && !plan.overflow) {
@@ -819,6 +1639,7 @@ async function applyBlockPaste(matrix) {
       title: `Paste ${plan.height} × ${plan.width} cells?`,
       message:
         `${plan.cells} cell(s) will be written` +
+        (plan.repeated ? ', repeating the copied block to fill the selection' : '') +
         (plan.overwritten ? `, ${plan.overwritten} of them over values already there` : '') +
         (plan.overflow ? `, and ${plan.overflow} new row(s) added at the end` : '') +
         (plan.skipped ? `. ${plan.skipped} cell(s) fall on calculated columns and are skipped` : '') +
@@ -946,43 +1767,23 @@ async function fillSelection(mode) {
     return;
   }
   const box = bounds(sel);
-  const start = rowAt(box.top);
-  if (!start) return;
-
-  const columns = [];
-  for (let c = box.left; c <= box.right; c += 1) {
-    const column = columnAt(c);
-    if (column && column.editable) columns.push(column.legacy_name);
-  }
-  if (!columns.length) {
-    toast('Those columns are calculated or looked up, so they cannot be filled', 'err');
-    return;
-  }
-
   const height = box.bottom - box.top;
-  const below = height > 0 ? height : view.grid.rows.length - box.top - 1;
-  if (below <= 0) {
+  const count = height > 0 ? height : view.grid.rows.length - box.top - 1;
+  if (count <= 0) {
     toast('Nothing below this row to fill', 'err');
     return;
   }
-
-  try {
-    const row = rowAt(box.top);
-    if (row) await flushRow(row);
-    view.grid = await api.schedules.fill(view.id, {
-      columns,
-      start_position: start.position,
-      count: below,
-      mode,
-    });
-    redrawPreservingFocus();
-    toast(
-      mode === 'series'
-        ? `Filled ${below} row(s), counting up`
-        : `Copied into ${below} row(s)`,
-      'ok'
-    );
-  } catch (error) { fail(error); }
+  // The same path the corner handle takes, so the toolbar and the drag cannot
+  // disagree about what a fill does — and so both leave the chip that offers
+  // the other way round.
+  await runFill({
+    seedIndex: box.top,
+    left: box.left,
+    right: box.right,
+    count,
+    direction: 'down',
+    mode,
+  });
 }
 
 async function undoEdit() {
@@ -1021,6 +1822,20 @@ function onType(row, key) {
   pending.set(row.id, setTimeout(() => flushRow(row), 500));
 }
 
+/**
+ * Settle every debounced save before something redraws the grid.
+ *
+ * Typing schedules a save 500ms out. Anything that rebuilds the rows in the
+ * meantime — adding a row, a fill, a paste — would otherwise race it, and the
+ * loser is whatever the user typed last.
+ */
+async function flushPending() {
+  const rows = [...pending.keys()]
+    .map((id) => view.grid.rows.find((r) => r.id === id))
+    .filter(Boolean);
+  for (const row of rows) await flushRow(row);
+}
+
 async function flushRow(row) {
   clearTimeout(pending.get(row.id));
   pending.delete(row.id);
@@ -1052,6 +1867,7 @@ function absorb(fresh) {
 
   view.grid.schedule = fresh.schedule;
   view.grid.history = fresh.history;
+  view.grid.suggestions = fresh.suggestions;
 
   if (!sameShape) {
     view.grid = fresh;
@@ -1099,8 +1915,33 @@ function absorb(fresh) {
     }
   });
 
-  refreshToolbar();
+  refreshSuggestions();
+  // Repaints the selection as well as the toolbar, because a patched cell has
+  // lost the classes and the fill handle that were sitting on it.
+  paintSelection();
   renderProblemSummary(document.querySelector('.page-wide > div:last-child'));
+}
+
+/**
+ * Move the offered reference to wherever it now belongs.
+ *
+ * A save patches the computed cells and deliberately leaves the inputs alone,
+ * so nothing rebuilds them — which means the ghost has to be moved by hand
+ * from the row that has just been filled in to the one below it.
+ */
+function refreshSuggestions() {
+  for (const [, entry] of cellIndex) {
+    const box = entry.td.querySelector('input');
+    if (!box || !entry.column.editable) continue;
+    const suggestion = nextValueFor(entry.row, entry.column.legacy_name);
+    if (suggestion) {
+      box.placeholder = suggestion;
+      box.dataset.suggest = suggestion;
+    } else if (box.dataset.suggest) {
+      box.placeholder = '';
+      delete box.dataset.suggest;
+    }
+  }
 }
 
 function saveState(state) {
@@ -1120,7 +1961,7 @@ function saveState(state) {
  * the table. Undo not working straight after a fill was exactly that.
  */
 function redrawPreservingFocus() {
-  const keep = sel ? { ...sel.focus } : null;
+  const keep = sel ? { ...activeCell(sel) } : null;
   const rectangle = sel;
   draw();
   if (keep) {
@@ -1132,6 +1973,11 @@ function redrawPreservingFocus() {
 /* ------------------------------------------------------- row operations --- */
 
 async function addRow(focusColumn) {
+  // Whatever is half-typed goes to the server first. Adding a row redraws the
+  // grid, and a redraw that lands before the pending save rebuilds the cell
+  // from a row the server has not been told about yet — which is what made a
+  // reference typed just before Enter flicker and come back on the wrong line.
+  await flushPending();
   try {
     const fresh = await api.schedules.addRow(view.id, {});
     view.grid = fresh;
@@ -1141,6 +1987,28 @@ async function addRow(focusColumn) {
       const column = focusColumn !== undefined ? focusColumn : (typeableIndexes()[0] ?? 0);
       focusCell(lastIndex, column);
     }
+  } catch (error) { fail(error); }
+}
+
+/**
+ * Add however many rows the count beside the button asks for.
+ *
+ * Fifty rows one Enter at a time is how somebody ends up pasting into Excel
+ * instead, so the count is a plain number box: type 50, press Enter or the
+ * button, and the grid is fifty rows longer.
+ */
+async function addRows() {
+  const box = toolbarNodes && toolbarNodes.rowCount;
+  const wanted = Math.max(1, Math.min(500, Number(box ? box.value : 1) || 1));
+  if (wanted === 1) { await addRow(); return; }
+
+  await flushPending();
+  try {
+    view.grid = await api.schedules.addRows(view.id, wanted);
+    draw();
+    const first = view.grid.rows.length - wanted;
+    if (first >= 0) focusCell(first, typeableIndexes()[0] ?? 0);
+    toast(`${wanted} rows added — Ctrl+Z to undo`, 'ok');
   } catch (error) { fail(error); }
 }
 
@@ -1157,7 +2025,7 @@ async function duplicateRow(row) {
 }
 
 function duplicateSelected() {
-  const row = (sel && rowAt(sel.focus.r)) || view.grid.rows[view.grid.rows.length - 1];
+  const row = (sel && rowAt(activeCell(sel).r)) || view.grid.rows[view.grid.rows.length - 1];
   if (row) duplicateRow(row);
 }
 
@@ -1387,10 +2255,40 @@ async function captureProduct(row, reference) {
     ]),
     actions: (close) => [
       button('Cancel', { on: { click: () => close(false) } }),
+      // One product is a form; a manufacturer's range is a table. The library
+      // screen already has the table, so this is a door to it rather than a
+      // second one written here — a range entered from a schedule and a range
+      // entered from the library page must not be two different experiences.
+      button('Add several…', {
+        title: 'The same table the Equipment page uses, for a whole range at once',
+        on: { click: () => close('grid') },
+      }),
       button('Save to library', { class: 'btn btn-primary', on: { click: () => close(true) } }),
     ],
   });
   if (!ok) return;
+
+  if (ok === 'grid') {
+    const seed = {
+      'Model Reference': reference,
+      ...Object.fromEntries(
+        Object.entries(inputs).map(([key, node]) => [key, node.value])
+      ),
+    };
+    const saved = await productGrid(
+      view.grid.schedule.code,
+      columns.map((c) => ({ name: c.name, unit: c.unit })),
+      { seed: [seed] }
+    );
+    if (!saved) return;
+    row.values['Model Reference'] = reference;
+    const entry = cellIndex.get(cellKey(row.id, 'Model Reference'));
+    const box = entry && entry.td.querySelector('input');
+    if (box) box.value = reference;
+    await flushRow(row);
+    toast(`${saved} product(s) saved to the library`, 'ok');
+    return;
+  }
 
   try {
     await api.library.save({
@@ -1925,8 +2823,8 @@ function scheduleNotesEditor(notes) {
     draft.forEach((note, index) => {
       list.appendChild(el('div', { class: 'note-row' }, [
         el('span', { class: 'muted tiny', text: `[${index + 1}]` }),
-        el('textarea', {
-          rows: 2, value: note,
+        textarea(note, {
+          rows: 2,
           on: { input: (e) => { draft[index] = e.target.value; } },
         }),
         el('button', {

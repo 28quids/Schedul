@@ -2,7 +2,9 @@
 
 import { api } from '../api.js';
 import { go, store } from '../app.js';
-import { button, el, empty, fail, field, formatDate, input, modal, mount, table } from '../ui.js';
+import {
+  button, el, empty, fail, field, formatDate, input, modal, mount, pageHead, table,
+} from '../ui.js';
 
 export async function projectsView() {
   const projects = await api.projects.list();
@@ -14,16 +16,11 @@ export async function projectsView() {
   });
 
   const page = el('div', { class: 'page' }, [
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: 'Projects' }),
-        el('div', {
-          class: 'sub',
-          text: 'Each project holds its buildings, their schedules, and the setup they all read from.',
-        }),
-      ]),
-      newButton,
-    ]),
+    pageHead(
+      'Projects',
+      'Each project holds its buildings, their schedules, and the setup they all read from.',
+      [newButton]
+    ),
   ]);
 
   if (!projects.length) {

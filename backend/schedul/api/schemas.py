@@ -13,12 +13,13 @@ __all__ = [
     "ScheduleIn", "ScheduleOut",
     "RowIn", "RowOut", "GridOut", "GridColumn",
     "PasteIn", "PastePreviewIn", "CellEdit", "CellsIn", "DeleteRowsIn", "FillIn",
-    "ScheduleNotesIn",
+    "ScheduleNotesIn", "AddRowsIn",
     "RevisionIn", "RevisionOut",
     "EquipmentIn", "EquipmentOut", "LibraryImportIn", "BulkEquipmentIn",
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
     "RenumberIn", "PlanOut", "PlanChange",
     "RegisterRow", "AuditOut", "HouseStandardIn",
+    "ProjectBrandingIn", "ColumnVisibilityIn",
 ]
 
 
@@ -87,6 +88,20 @@ class ProjectIn(BaseModel):
     #: Notes this job adds under the organisation's. None leaves them as they
     #: are, so a form that does not carry them cannot blank them by omission.
     notes: list[str] | None = None
+
+
+class ProjectBrandingIn(BaseModel):
+    """What one job answers differently about its documents.
+
+    Only the parts ``core.branding.PROJECT_KEYS`` allows. Fonts, colours and the
+    logo are house standard and are not on offer here.
+    """
+
+    cover_fields: dict[str, bool] = Field(default_factory=dict)
+    cover_order: list[str] = Field(default_factory=list)
+    revision_fields: dict[str, bool] = Field(default_factory=dict)
+    revision_order: list[str] = Field(default_factory=list)
+    cover_subtitle: str | None = None
 
 
 class ScheduleOut(BaseModel):
@@ -183,6 +198,16 @@ class GridColumn(BaseModel):
     project_extra: bool = False
 
 
+class ColumnVisibilityIn(BaseModel):
+    """Which columns this schedule hides, and where.
+
+    ``{"Price (GBP)": {"pdf": false, "xlsx": false}}``. A target left out means
+    the column shows there, so the payload only ever carries the exceptions.
+    """
+
+    columns: dict[str, dict[str, bool]] = Field(default_factory=dict)
+
+
 class RowOut(BaseModel):
     id: str
     position: int
@@ -211,6 +236,9 @@ class GridOut(BaseModel):
     history: dict[str, Any] = Field(default_factory=dict)
     #: Set when the type has moved on since this schedule was built.
     type_drift: dict[str, Any] = Field(default_factory=dict)
+    #: Per input column: what has been typed in it before, and the reference
+    #: after the last one. Read from this schedule, never imposed on it.
+    suggestions: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScheduleNotesIn(BaseModel):
@@ -225,6 +253,12 @@ class RowIn(BaseModel):
     #: Deliberate divergences from the equipment library, keyed by column name.
     #: Sending an empty value clears the override and restores the library value.
     overrides: dict[str, Any] | None = None
+
+
+class AddRowsIn(BaseModel):
+    """How many empty rows to add at the end, as one undoable step."""
+
+    count: int = 1
 
 
 class PasteIn(BaseModel):
@@ -300,6 +334,13 @@ class FillIn(BaseModel):
     #: How many rows below the start to fill. Omit to reach the end.
     count: int | None = None
     mode: Literal["series", "copy"] = "series"
+    #: Which way the fill runs. A spreadsheet's fill handle drags both ways, and
+    #: dragging up from RAD-005 counts down rather than repeating it.
+    direction: Literal["down", "up"] = "down"
+    #: Which run of digits in the value counts, from the left; -1 is the last,
+    #: which is what a spreadsheet does. Omit to work it out from the cells that
+    #: are already filled, and fall back to the last run when they do not say.
+    index: int | None = None
 
     @property
     def target_columns(self) -> list[str]:

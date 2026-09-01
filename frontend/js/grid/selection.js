@@ -80,12 +80,24 @@ export function move(selection, dr, dc, extent, { extend = false } = {}) {
   const { rowCount, columnCount } = extent;
   if (!rowCount || !columnCount) return null;
 
-  const r = selection.focus.r + dr;
-  const c = selection.focus.c + dc;
+  // Extending moves the loose end of the drag; a plain arrow leaves from
+  // wherever the caret actually is, which is not the same cell once somebody
+  // has been tabbing around inside a selected block.
+  const from = extend ? selection.focus : (selection.active || selection.focus);
+  const r = from.r + dr;
+  const c = from.c + dc;
   if (r < 0 || r >= rowCount || c < 0 || c >= columnCount) return null;
 
   const focus = { r, c };
-  return extend ? { anchor: { ...selection.anchor }, focus } : cellSelection(r, c);
+  if (!extend) return cellSelection(r, c);
+  // Extending moves the far end and leaves the caret where it was, which is
+  // what a spreadsheet does: Shift+Down from A1 selects the column but leaves
+  // you typing in A1, so Enter then walks the block from its start.
+  return {
+    anchor: { ...selection.anchor },
+    focus,
+    active: { ...(selection.active || selection.anchor) },
+  };
 }
 
 /**
@@ -106,6 +118,56 @@ export function step(selection, dc, extent) {
   return cellSelection(r, c);
 }
 
+/**
+ * The cell the caret is in.
+ *
+ * Usually the focus — the end of the drag that made the selection. It differs
+ * once somebody starts typing their way around a selected block: the block is
+ * still anchor-to-focus, and the caret moves inside it. Keeping the two apart
+ * is what lets a block stay the same rectangle while it is being filled in;
+ * moving the focus would shrink the very selection being walked.
+ */
+export function activeCell(selection) {
+  if (!selection) return null;
+  return selection.active || selection.focus;
+}
+
+/** The same selection with the caret somewhere else inside it. */
+export function withActive(selection, cell) {
+  return { anchor: selection.anchor, focus: selection.focus, active: cell };
+}
+
+/**
+ * The next cell inside a selected rectangle: across the row, then down.
+ *
+ * With a block selected, Enter and Tab walk the block rather than the sheet, so
+ * filling in a chosen rectangle means typing and pressing Enter without ever
+ * steering. It wraps at the end back to the top-left, which is what makes a
+ * selection a place to work rather than a fence to fall off.
+ *
+ * Returns the cell, or null when the selection is a single cell and there is
+ * nothing to walk.
+ */
+export function nextInRange(selection, step = 1) {
+  if (!selection || isSingleCell(selection)) return null;
+  const box = bounds(selection);
+  const width = box.right - box.left + 1;
+  const height = box.bottom - box.top + 1;
+
+  // Where the caret sits in the block, counted across then down.
+  const at = activeCell(selection);
+  const row = Math.min(Math.max(at.r - box.top, 0), height - 1);
+  const column = Math.min(Math.max(at.c - box.left, 0), width - 1);
+  const index = row * width + column;
+
+  const total = width * height;
+  const next = ((index + step) % total + total) % total;
+  return {
+    r: box.top + Math.floor(next / width),
+    c: box.left + (next % width),
+  };
+}
+
 /** Grow the selection to whole rows, which is what clicking a row number means. */
 export function selectRows(top, bottom, columnCount) {
   return {
@@ -122,5 +184,7 @@ export function clampTo(selection, extent) {
     r: clamp(cell.r, rowCount - 1),
     c: clamp(cell.c, columnCount - 1),
   });
-  return { anchor: fix(selection.anchor), focus: fix(selection.focus) };
+  const clamped = { anchor: fix(selection.anchor), focus: fix(selection.focus) };
+  if (selection.active) clamped.active = fix(selection.active);
+  return clamped;
 }

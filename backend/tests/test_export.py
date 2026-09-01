@@ -142,7 +142,17 @@ class TestStructure:
         page are formulas, so a rename stays one write."""
         path = render_schedule(make_content(catalogue_types), tmp_path / "s.xlsx")
         wb = load_workbook(path)
-        assert wb["Front Cover"]["A43"].value.startswith("=Config!")
+        cover = wb["Front Cover"]
+        # Wherever the layout put it, the cover reads Config rather than holding
+        # its own copy. The row is found rather than hardcoded, so moving the
+        # block does not silently stop testing the thing this is about.
+        cover_refs = [
+            str(cover.cell(r, 1).value)
+            for r in range(1, 70)
+            if isinstance(cover.cell(r, 1).value, str)
+            and cover.cell(r, 1).value.startswith("=Config!")
+        ]
+        assert cover_refs
         rv = wb["Revision page"]
         building = [rv.cell(r, 2).value for r in range(10, 24) if rv.cell(r, 1).value == "Building"]
         assert building and building[0].startswith("=Config!")
@@ -329,3 +339,147 @@ class TestPdf:
         xlsx = render_schedule(make_content(catalogue_types), tmp_path / "s.xlsx")
         with pytest.raises(pdf.PdfError, match="not found"):
             pdf.to_pdf(xlsx, tmp_path)
+
+
+class TestTheCoverAndTitleBlock:
+    """What a reader sees first, and whether it fits on one page.
+
+    A cover that spills onto a second sheet, a project name in mixed case where
+    the house format is capitals, and a document number too wide for the column
+    it sits in are all things nobody notices until the file has been issued.
+    """
+
+    def _cover(self, catalogue_types, tmp_path, **overrides):
+        path = render_schedule(
+            make_content(catalogue_types, **overrides), tmp_path / "cover.xlsx"
+        )
+        return load_workbook(path)
+
+    def test_the_cover_starts_at_row_one(self, catalogue_types, tmp_path):
+        cover = self._cover(catalogue_types, tmp_path)["Front Cover"]
+        assert cover["A1"].value == "Intended for", (
+            "nine blank rows above the first field is what pushed the cover onto "
+            "a second page"
+        )
+
+    def test_the_cover_is_one_page_tall(self, catalogue_types, tmp_path):
+        cover = self._cover(catalogue_types, tmp_path)["Front Cover"]
+        bottom = int(str(cover.print_area).rsplit("$", 1)[1])
+        height = sum(
+            cover.row_dimensions[r].height or 15.0 for r in range(1, bottom + 1)
+        )
+        assert height <= 734.0, (
+            f"the cover is {height:.0f}pt tall and an A4 page holds 734pt"
+        )
+        assert cover.page_setup.fitToHeight == 1
+
+    def test_the_title_block_is_not_jammed_against_the_bottom(
+        self, catalogue_types, tmp_path
+    ):
+        cover = self._cover(catalogue_types, tmp_path)["Front Cover"]
+        title = next(
+            r for r in range(1, 70)
+            if str(cover.cell(r, 1).value or "").startswith("=Config!$B$")
+            and cover.row_dimensions[r].height
+        )
+        above = sum(cover.row_dimensions[r].height or 15.0 for r in range(1, title))
+        below = 734.0 - sum(
+            cover.row_dimensions[r].height or 15.0
+            for r in range(1, int(str(cover.print_area).rsplit("$", 1)[1]) + 1)
+        )
+        # The fields take up the top of the page, so the block cannot sit at the
+        # exact centre; what it must not do is end up hard against the margin.
+        assert below > 30, "the title block is pinned to the bottom of the page"
+        assert above > 0
+
+    def test_the_project_name_is_capitalised_with_the_building_appended(
+        self, catalogue_types, tmp_path
+    ):
+        book = self._cover(
+            catalogue_types, tmp_path,
+            project_fields={**PROJECT_FIELDS, "Project Name": "Mote Road"},
+            building_ref="BLK-A",
+            building_name="Block A",
+        )
+        config = book["Config"]
+        title = next(
+            config.cell(r, 2).value for r in range(1, 30)
+            if config.cell(r, 1).value == "ProjectTitle"
+        )
+        assert title == "MOTE ROAD - BLOCK A"
+
+    def test_a_building_with_no_name_adds_nothing_to_the_title(
+        self, catalogue_types, tmp_path
+    ):
+        book = self._cover(
+            catalogue_types, tmp_path,
+            project_fields={**PROJECT_FIELDS, "Project Name": "Mote Road"},
+            building_ref="CM4220",
+            building_name="",
+        )
+        config = book["Config"]
+        title = next(
+            config.cell(r, 2).value for r in range(1, 30)
+            if config.cell(r, 1).value == "ProjectTitle"
+        )
+        assert title == "MOTE ROAD", (
+            "a single-building job's reference is allocated, not named, and says "
+            "nothing the document number does not"
+        )
+
+    def test_both_title_blocks_read_the_same_stored_title(
+        self, catalogue_types, tmp_path
+    ):
+        book = self._cover(catalogue_types, tmp_path)
+        config = book["Config"]
+        row = next(
+            r for r in range(1, 30) if config.cell(r, 1).value == "ProjectTitle"
+        )
+        reference = f"=Config!$B${row}"
+        cover = book["Front Cover"]
+        assert any(
+            cover.cell(r, 1).value == reference for r in range(1, 70)
+        )
+        assert book["Revision page"]["A3"].value == reference
+
+
+class TestTheRevisionPage:
+    def test_the_derivation_note_is_not_on_an_issued_document(
+        self, catalogue_types, tmp_path
+    ):
+        path = render_schedule(make_content(catalogue_types), tmp_path / "s.xlsx")
+        page = load_workbook(path)["Revision page"]
+        text = " ".join(
+            str(page.cell(r, 1).value) for r in range(1, 60) if page.cell(r, 1).value
+        )
+        assert "derive from" not in text
+
+    def test_the_document_number_column_is_wide_enough_to_read(
+        self, catalogue_types, tmp_path
+    ):
+        path = render_schedule(make_content(catalogue_types), tmp_path / "s.xlsx")
+        page = load_workbook(path)["Revision page"]
+        docnum = "CM4220-BOV-5_7-HQ049-SC-M-00000010-G00300-XX-XX"
+        assert page.column_dimensions["B"].width >= len(docnum)
+
+    def test_the_log_follows_the_summary_rather_than_a_fixed_row(
+        self, catalogue_types, tmp_path
+    ):
+        path = render_schedule(make_content(catalogue_types), tmp_path / "s.xlsx")
+        page = load_workbook(path)["Revision page"]
+        header = next(
+            r for r in range(10, 60)
+            if page.cell(r, 1).value == "Revision" and page.cell(r, 2).value == "Status"
+        )
+        summary_bottom = max(
+            r for r in range(10, header) if page.cell(r, 1).value
+        )
+        assert header - summary_bottom <= 4, (
+            "the gap that held the removed note must not stay behind as blank page"
+        )
+
+    def test_the_project_name_row_prints_in_capitals(self, catalogue_types, tmp_path):
+        path = render_schedule(make_content(catalogue_types), tmp_path / "s.xlsx")
+        page = load_workbook(path)["Revision page"]
+        row = next(r for r in range(10, 40) if page.cell(r, 1).value == "Project Name")
+        assert str(page.cell(row, 2).value).startswith("=UPPER(")

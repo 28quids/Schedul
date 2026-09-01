@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import datetime as _dt
+import io
+import tempfile
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,20 +22,28 @@ from ...services.converters import (
     revisions_of,
     type_from_row,
 )
-from ...services.columns import columns_for
+from ...export.library import read_library_workbook, render_grid_workbook
+from ...services.columns import (
+    TARGETS, columns_for, validate_visibility, visibility_view,
+)
 from ...services.issue import diff_snapshots, issue_revision
 from ...services import history as hist
 from ...services import notes as notes_svc
-from ...services.grid import build_grid, editable_payload, override_payload
+from ...services.grid import (
+    build_grid, editable_payload, override_payload, suggestions_for,
+)
 from ..deps import current_org, get_db, get_schedule, schedule_view
-from ...core.references import fill_series
+from ...core import references
+from ...core.references import fill_series, varying_run
 from ...core import tabular
 from ..schemas import (
-    CellsIn, DeleteRowsIn, FillIn, GridColumn, GridOut, PasteIn, PastePreviewIn,
-    RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
+    AddRowsIn, CellsIn, ColumnVisibilityIn, DeleteRowsIn, FillIn, GridColumn, GridOut,
+    PasteIn, PastePreviewIn, RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
 )
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
+
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
@@ -76,6 +88,12 @@ def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
         },
         history=hist.history_state(session, schedule.id),
         type_drift=_type_drift(schedule),
+        # What this schedule already says, for the editor to offer back. It
+        # travels with the grid rather than on its own endpoint because it is
+        # only ever a reading of the rows that came with it, and a suggestion
+        # made from a stale reading is a suggestion that puts back a value
+        # somebody has just corrected.
+        suggestions=suggestions_for(schedule.rows, stype),
     )
 
 
@@ -152,6 +170,35 @@ def add_row(
     session.flush()
     session.expire(schedule, ["rows"])
     hist.record_edit(session, schedule, "add_row", before, summary="added a row")
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/rows/many", response_model=GridOut, status_code=201)
+def add_rows(
+    payload: AddRowsIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Add several empty rows at once, as one undoable step.
+
+    Fifty rows one Enter at a time is how somebody ends up building the schedule
+    in Excel instead. One step rather than fifty also means one entry in the
+    undo stack: adding fifty rows by mistake takes one Ctrl+Z to put right.
+    """
+    if not 1 <= payload.count <= 500:
+        raise HTTPException(
+            status_code=400, detail="between 1 and 500 rows can be added at once"
+        )
+    before = hist.snapshot_rows(schedule)
+    position = max((r.position for r in schedule.rows), default=-1) + 1
+    for offset in range(payload.count):
+        session.add(ScheduleRow(schedule_id=schedule.id, position=position + offset))
+    session.flush()
+    session.expire(schedule, ["rows"])
+    hist.record_edit(
+        session, schedule, "add_rows", before, summary=f"{payload.count} rows added"
+    )
     return _grid(session, schedule, org)
 
 
@@ -483,25 +530,96 @@ def fill_down(
     if start is None:
         raise HTTPException(status_code=404, detail="no row at that position")
 
-    below = ordered[start + 1 :]
+    if payload.direction == "up":
+        # Nearest first, so the series counts away from the seed the way a
+        # spreadsheet's handle dragged upwards does.
+        target = list(reversed(ordered[:start]))
+        step = -1
+    else:
+        target = ordered[start + 1 :]
+        step = 1
     if payload.count is not None:
-        below = below[: max(0, payload.count)]
-    if not below:
+        target = target[: max(0, payload.count)]
+    if not target:
         return _grid(session, schedule, org)
 
     before = hist.snapshot_rows(schedule)
     for key in keys:
-        seed = (ordered[start].values or {}).get(key, "")
-        for row, value in zip(below, fill_series(seed, len(below), mode=payload.mode)):
+        window = [ordered[start], *target]
+        seeds = _leading_values(window, key)
+
+        # Two filled cells say what one cannot: which number in the value is the
+        # one that counts, and by how much. 'RM0.01 2 Bedroom' alone could count
+        # either number; alongside 'RM0.02 2 Bedroom' it plainly counts the room
+        # and leaves the bed count alone. A copy is never inferred -- Fill down
+        # means the top cell into all of them, whatever is already there.
+        # A range that is already full end to end has no empty cells to infer
+        # for, and somebody filling it means "recount it from the top" -- so
+        # that falls back to one seed over the lot rather than doing nothing.
+        infer = (
+            payload.mode == "series"
+            and payload.index is None
+            and 1 < len(seeds) < len(window)
+        )
+        pattern = seeds if infer else seeds[:1]
+        rest = window[len(pattern):] if infer else target
+
+        index = payload.index if payload.index is not None else -1
+        row_step = step
+        if infer:
+            found = varying_run(pattern)
+            if found is not None:
+                index = found
+            row_step = _inferred_step(pattern, index) or step
+
+        seed = (pattern[-1] if pattern else "")
+        filled = fill_series(
+            seed, len(rest), mode=payload.mode, step=row_step, index=index
+        )
+        for row, value in zip(rest, filled):
             row.values = {**(row.values or {}), key: value}
 
     session.flush()
     session.expire(schedule, ["rows"])
     hist.record_edit(
         session, schedule, "fill", before,
-        summary=f"filled {len(below)} row(s)",
+        summary=f"filled {len(target)} row(s)",
     )
     return _grid(session, schedule, org)
+
+
+def _leading_values(rows, key: str) -> list:
+    """The run of filled values at the start of a window, and no further.
+
+    A gap ends the pattern. Reading past one would treat two unrelated blocks of
+    values as a single series and count from the wrong place.
+    """
+    out = []
+    for row in rows:
+        value = (row.values or {}).get(key, "")
+        if value in (None, ""):
+            break
+        out.append(value)
+    return out
+
+
+def _inferred_step(values, index: int) -> int | None:
+    """By how much the counted number moves between the last two seeds.
+
+    ``RAD-001, RAD-003`` counts in twos, as a spreadsheet does. None when the
+    two cannot be read as numbers at all.
+    """
+    if len(values) < 2:
+        return None
+    try:
+        runs = [references.digit_runs(v) for v in values[-2:]]
+        numbers = [
+            int(str(v)[run[index][0]:run[index][1]])
+            for v, run in zip(values[-2:], runs)
+        ]
+    except (IndexError, ValueError):
+        return None
+    return (numbers[1] - numbers[0]) or None
 
 
 # ------------------------------------------------------------------ undo ---
@@ -533,6 +651,162 @@ def redo_edit(
     except hist.UndoError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _grid(session, schedule, org)
+
+
+# ----------------------------------------------------------------- notes ---
+
+
+# -------------------------------------------------------- the round trip ---
+
+
+@router.get("/{schedule_id}/rows.xlsx")
+def export_rows(
+    filled: bool = True,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> FileResponse:
+    """The columns somebody types into, as a spreadsheet with the headings on.
+
+    Not the deliverable -- that is ``export.xlsx``, and it carries the cover, the
+    revision page and every calculated column. This is the working file: the
+    typed columns only, so a hundred rows can be filled in wherever that is
+    quickest and brought straight back. ``filled=false`` gives the same file
+    empty, which is the blank one to hand somebody.
+
+    Library and calculated columns are deliberately absent. One is looked up and
+    the other is worked out, so either would come back as a stale copy of
+    something already known.
+    """
+    stype = columns_for(schedule)
+    columns = _editable_names(stype)
+    rows = (
+        [
+            {key: (r.values or {}).get(key) for key in columns}
+            for r in sorted(schedule.rows, key=lambda r: r.position)
+        ]
+        if filled
+        else []
+    )
+
+    name = f"{schedule.code}_rows{'' if filled else '_blank'}.xlsx"
+    tmp = Path(tempfile.mkdtemp(prefix="schedul-rows-"))
+    path = render_grid_workbook(
+        columns, rows, tmp / name,
+        sheet=schedule.code,
+        note=(
+            "These are the columns you type into. Product and calculated columns "
+            "are not here: one is looked up from the equipment library and the "
+            "other is worked out, so filling them in would be filling in a copy. "
+            "Add rows under the headings and bring the file back."
+        ),
+    )
+    return FileResponse(path, filename=name, media_type=XLSX_MEDIA)
+
+
+@router.post("/{schedule_id}/rows/workbook")
+async def import_rows(
+    file: UploadFile = File(...),
+    mode: str = Form("append"),
+    apply: bool = Form(False),
+    confirm: bool = Form(False),
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Read a filled-in workbook back onto this schedule.
+
+    The sheet becomes tab-separated text and is handed to the paste path the
+    browser already uses, so the counts somebody confirms, the header detection
+    and the refusal to replace a filled-in schedule unasked are the ones that
+    exist rather than a second set written for files.
+    """
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(
+            status_code=400,
+            detail="that is not an Excel workbook. Save it as .xlsx and try again.",
+        )
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="the file is empty")
+
+    try:
+        blocks = read_library_workbook(io.BytesIO(raw))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"that workbook could not be read: {exc}"
+        ) from exc
+    if not blocks:
+        raise HTTPException(
+            status_code=400,
+            detail="no sheet in that workbook had a heading row and data under it",
+        )
+
+    stype = columns_for(schedule)
+    text = str(blocks[0]["text"])
+    plan = _paste_plan(schedule, stype, mode=mode, text=text, header=True, position=0)
+    result: dict[str, object] = {
+        **plan.to_dict(),
+        "sheet": blocks[0]["sheet"],
+        "applied": 0,
+        # A workbook's first line is a heading row by construction rather than
+        # by guess, so the summary says it was read as one rather than leaving
+        # somebody wondering whether their headings became a row of data.
+        "header_detected": True,
+    }
+    if not apply:
+        return result
+
+    grid = paste_rows(
+        PasteIn(mode=mode, text=text, header=True, position=0, confirm=confirm),
+        schedule=schedule, session=session, org=org,
+    )
+    result["applied"] = plan.detected_rows
+    result["grid"] = grid.model_dump(mode="json")
+    return result
+
+
+# --------------------------------------------------------------- columns ---
+
+
+def _columns_payload(schedule: Schedule) -> dict[str, object]:
+    return {
+        "targets": list(TARGETS),
+        "columns": visibility_view(schedule),
+    }
+
+
+@router.get("/{schedule_id}/columns")
+def read_columns(schedule: Schedule = Depends(get_schedule)) -> dict[str, object]:
+    """Every column on this schedule, and where each one currently shows.
+
+    Which columns can be hidden is part of the answer rather than something the
+    browser works out: the lookup key and anything a calculation reads are
+    reported as fixed, so no screen can offer a switch that would produce a
+    workbook with a broken reference in it.
+    """
+    return _columns_payload(schedule)
+
+
+@router.put("/{schedule_id}/columns")
+def write_columns(
+    payload: ColumnVisibilityIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Hide or show columns on this one schedule.
+
+    Refused rather than half-applied: if any column in the request cannot be
+    hidden, nothing is stored and the reasons come back. A partially applied
+    change would leave somebody believing the cost column is off the client's
+    copy when it is not.
+    """
+    cleaned, problems = validate_visibility(schedule, payload.columns)
+    if problems:
+        raise HTTPException(status_code=400, detail=problems)
+    schedule.column_visibility = cleaned
+    session.flush()
+    return _columns_payload(schedule)
 
 
 # ----------------------------------------------------------------- notes ---

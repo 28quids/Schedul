@@ -282,6 +282,7 @@ table.sheet td.cell-input input {
 table.sheet td.cell-input input:focus {
   box-shadow: inset 0 0 0 2px var(--blue); position: relative; z-index: 1;
 }
+table.sheet tbody td { position: relative; }
 table.sheet td.cell-library, table.sheet td.cell-derived { padding: 4px 7px; }
 table.sheet td.cell-library { color: var(--library-text); }
 table.sheet td.cell-derived { color: var(--derived-text); font-variant-numeric: tabular-nums; }
@@ -413,8 +414,42 @@ td.cell-input .with-flag { display: flex; align-items: center; }
 td.cell-input .with-flag input { flex: 1; min-width: 0; }
 
 td.cell-selected input { box-shadow: inset 0 0 0 2px var(--blue); }
-.sheet-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+/* One toolbar shape, used on every screen that has one: groups of related
+   buttons separated by a rule, and anything that is not an action pushed to the
+   right. Consistency here is what stops "where is delete" being a different
+   answer on each page. */
+.sheet-toolbar {
+  display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-bottom: 12px;
+}
+.tool-group { display: flex; gap: 6px; align-items: center; padding-right: 10px; }
+.tool-group + .tool-group { border-left: 1px solid var(--grey-300); padding-left: 10px; }
+.toolbar-end {
+  margin-left: auto; display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+}
 .toolbar-gap { width: 10px; }
+
+/* -------------------------------------------------------- the fill handle --- */
+
+/* The small square at the corner of the selection. A spreadsheet's most-used
+   gesture, and the reason nobody had to know where the Fill series button was. */
+.fill-handle {
+  position: absolute; right: -3px; bottom: -3px; width: 7px; height: 7px;
+  background: var(--blue); border: 1px solid var(--white); border-radius: 1px;
+  cursor: crosshair; z-index: 2;
+}
+table.sheet td.fill-preview {
+  box-shadow: inset 0 0 0 1px var(--blue);
+  background-image: linear-gradient(var(--sel-wash), var(--sel-wash));
+}
+.fill-chip {
+  position: fixed; z-index: 60; display: flex; gap: 8px; align-items: center;
+  background: var(--white); border: 1px solid var(--grey-300);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 5px 8px;
+  color: var(--grey-600);
+}
+
+/* The columns dialog: a tick per target, centred under its heading. */
+td.tick, th.tick { text-align: center; }
 
 /* ------------------------------------------------------------ selection --- */
 
@@ -622,3 +657,70 @@ tr.detail-row > td { background: var(--grey-50); padding: 8px 12px; }
 
 .room-block { margin-bottom: 16px; }
 .room-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
+
+/* ------------------------------------------- the library's column headings --- */
+
+/* A boxed sub-section inside a dialog. Used where something needs its own head
+   and actions without being a card in its own right. */
+.panel {
+  border: 1px solid var(--grey-300); border-radius: var(--radius);
+  background: var(--grey-50); padding: 10px 12px;
+}
+.panel-head {
+  display: flex; gap: 10px; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; margin-bottom: 8px;
+}
+
+/* The heading row of the library workbook, shown so it can be read and copied
+   rather than described in a sentence. */
+table.headings { font-size: 11.5px; }
+table.headings th {
+  white-space: nowrap; background: var(--grey-100); color: var(--grey-800);
+  text-transform: none; letter-spacing: 0; font-weight: 600;
+}
+table.headings th.key { background: var(--blue-wash); color: var(--blue-dark); }
+table.headings td { white-space: nowrap; }
+
+/* ------------------------------------------ this project's document fields --- */
+
+.field-chooser { margin-top: 8px; }
+.chooser-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 10px; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--grey-200);
+}
+.chooser-row:last-child { border-bottom: none; }
+.chooser-row select { font-size: 12px; }
+
+/* The row count sits against the Add button, as one control rather than two. */
+.add-rows { display: flex; align-items: stretch; }
+.add-rows .btn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.add-rows .row-count {
+  width: 56px; border: 1px solid var(--grey-300); border-left: none;
+  border-top-right-radius: var(--radius); border-bottom-right-radius: var(--radius);
+  padding: 0 6px; font: inherit; font-size: 12px; text-align: center;
+  background: var(--white); color: var(--grey-800);
+}
+.add-rows .row-count:focus { outline: none; box-shadow: inset 0 0 0 2px var(--blue); }
+
+/* The offer to fill the rows that match. Wider than the fill chip because it
+   has to say what it would do before it does it. */
+.group-chip { max-width: 420px; gap: 10px; }
+.group-chip .tiny { color: var(--grey-700); }
+
+/* ------------------------------------------------------- the library table --- */
+
+.library-filters {
+  display: flex; gap: 10px; flex: 1; flex-wrap: wrap; align-items: center;
+}
+.library-filters select { flex: 0 0 auto; min-width: 220px; max-width: 320px; }
+.library-filters input[type="text"] { flex: 1; min-width: 200px; }
+.library-filters label { display: flex; gap: 5px; align-items: center; color: var(--grey-600); }
+
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--blue-dark); }
+th.sorted { color: var(--blue-dark); }
+.sort-arrow { font-size: 9px; }
+
+/* An entry that looks like the same product entered twice. Marked rather than
+   hidden: which of the two is the real one is not ours to decide. */
+tr.suspect td { background: var(--amber-wash); }

@@ -8,7 +8,7 @@ import { api } from '../api.js';
 import { go, refresh, setContext, store } from '../app.js';
 import {
   button, card, clear, confirmDialog, download, el, empty, fail, field, formatDate,
-  input, modal, mount, notice, pill, select, show, table, toast,
+  input, modal, mount, notice, pageHead, pill, select, show, table, textarea, toast,
 } from '../ui.js';
 
 let state = { project: null, buildingId: null, tab: 'schedules', query: '' };
@@ -71,35 +71,33 @@ function draw() {
     el('div', { class: 'crumbs' }, [
       el('a', { href: '#/projects', text: 'Projects' }), ' / ', p.number || p.name || 'Project',
     ]),
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: p.name || p.number || 'Untitled project' }),
-        el('div', { class: 'sub' }, [
-          `${p.number || 'no number'} · ${p.client || 'no client'} · `,
-          `${p.schedule_count} schedule${p.schedule_count === 1 ? '' : 's'}`,
-          multi ? ` across ${p.buildings.length} buildings` : '',
-        ]),
-      ]),
-      el('div', { class: 'btn-row' }, [
-        button('Export all (.xlsx)', {
-          title: 'Every schedule as an issued document, in one zip',
-          on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=xlsx`) },
+    pageHead(
+      p.name || p.number || 'Untitled project',
+      `${p.number || 'no number'} · ${p.client || 'no client'} · ` +
+        `${p.schedule_count} schedule${p.schedule_count === 1 ? '' : 's'}` +
+        (multi ? ` across ${p.buildings.length} buildings` : ''),
+      [
+        button('MAINPROJECTINFO', {
+          title: 'The master setup and read document, as a workbook',
+          on: { click: () => download(`/api/projects/${p.id}/projectinfo.xlsx`) },
         }),
         store.pdfAvailable
           ? button('Export all (PDF)', {
               on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=pdf`) },
             })
           : null,
+        button('Export all (.xlsx)', {
+          title: 'Every schedule as an issued document, in one zip',
+          on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=xlsx`) },
+        }),
+        // The one thing this screen is for once a project is under way.
         button('Issue a revision…', {
+          class: 'btn btn-primary',
           title: 'Append the next revision across several schedules at once',
           on: { click: () => bulkRevision() },
         }),
-        button('MAINPROJECTINFO', {
-          title: 'The master setup and read document, as a workbook',
-          on: { click: () => download(`/api/projects/${p.id}/projectinfo.xlsx`) },
-        }),
-      ]),
-    ]),
+      ]
+    ),
     tabs(),
   ]);
 
@@ -800,9 +798,8 @@ function drawSetup(root) {
   ));
 
   // The middle notes layer: under the practice's, above the equipment type's.
-  const notesArea = el('textarea', {
+  const notesArea = textarea((p.notes || []).join('\n'), {
     rows: 6,
-    value: (p.notes || []).join('\n'),
     placeholder: 'One per line. Left blank, this job adds nothing of its own.',
   });
 
@@ -840,6 +837,8 @@ function drawSetup(root) {
     })]
   ));
 
+  drawDocumentFields(root, p);
+
   const preview = p.naming_preview || {};
   root.appendChild(card(
     'Document numbering',
@@ -865,6 +864,124 @@ function drawSetup(root) {
     ]),
     [button('Edit the pattern', { on: { click: () => go('/settings') } })],
     'Volume follows the equipment type, so an AHU is always ventilation without anyone setting it.'
+  ));
+}
+
+/**
+ * Which fields this job's covers and revision pages carry.
+ *
+ * The same list the house standard has, answered for one job. A job with no
+ * blocks does not want a Building row and a job with three does; that is a
+ * decision about a job, and settling it once for the whole practice was the
+ * thing that made the house standard's own note a lie.
+ *
+ * Three states per field, not two: follow the practice, always show, always
+ * hide. "Follow" is the default and it matters — a project that silently froze
+ * its answer at whatever the house standard said the day it was created would
+ * stop tracking the practice without anybody asking it to.
+ */
+async function drawDocumentFields(root, project) {
+  const host = el('div');
+  root.appendChild(host);
+
+  let data;
+  try {
+    data = await api.projects.branding(project.id);
+  } catch (error) { host.appendChild(notice(error.message, 'error')); return; }
+
+  const draft = {
+    cover_fields: { ...(data.overrides.cover_fields || {}) },
+    revision_fields: { ...(data.overrides.revision_fields || {}) },
+  };
+
+  const chooser = (group, fields) => el('div', { class: 'field-chooser' },
+    fields.map((f) => {
+      const value = draft[group][f.key] === undefined
+        ? ''
+        : (draft[group][f.key] ? 'show' : 'hide');
+      const control = select(
+        [
+          ['', `Follow the practice (${f.house ? 'shown' : 'hidden'})`],
+          ['show', 'Always show'],
+          ['hide', 'Always hide'],
+        ],
+        value,
+        {
+          disabled: !f.optional,
+          on: {
+            change: (e) => {
+              if (e.target.value === '') delete draft[group][f.key];
+              else draft[group][f.key] = e.target.value === 'show';
+            },
+          },
+        }
+      );
+      return el('div', { class: 'chooser-row' }, [
+        el('div', {}, [
+          el('div', { text: f.label }),
+          el('div', { class: 'muted tiny', text: f.optional ? f.hint : 'The workbook reads this row, so it always shows.' }),
+        ]),
+        control,
+      ]);
+    })
+  );
+
+  const save = async () => {
+    try {
+      await api.projects.setBranding(project.id, {
+        cover_fields: draft.cover_fields,
+        revision_fields: draft.revision_fields,
+      });
+      toast('This project’s document fields saved', 'ok');
+      clear(host);
+      await drawDocumentFields(host, project);
+    } catch (error) { fail(error); }
+  };
+
+  const changed = Object.keys(draft.cover_fields).length
+    + Object.keys(draft.revision_fields).length;
+
+  host.appendChild(card(
+    'What this project’s documents show',
+    el('div', {}, [
+      el('p', { class: 'muted tiny' }, [
+        'The practice-wide setting is the default; this is where one job differs from it. ',
+        'Fonts, colours and the logo stay house standard — every document that leaves the ',
+        'office should look like it came from the same place.',
+      ]),
+      changed
+        ? notice(`${changed} field(s) on this job differ from the house standard.`, 'info')
+        : null,
+      el('div', { class: 'grid-2', style: 'margin-top:12px' }, [
+        el('div', {}, [
+          el('strong', { class: 'tiny', text: 'Front cover' }),
+          chooser('cover_fields', data.cover_fields),
+        ]),
+        el('div', {}, [
+          el('strong', { class: 'tiny', text: 'Revision page' }),
+          chooser('revision_fields', data.revision_fields),
+        ]),
+      ]),
+      el('p', { class: 'muted tiny', style: 'margin-top:12px' }, [
+        'As it stands, the cover carries: ',
+        data.preview.cover.map((f) => f.label).join(', ') || 'nothing',
+        '.',
+      ]),
+    ]),
+    [
+      button('Follow the practice for everything', {
+        disabled: !changed,
+        on: {
+          click: async () => {
+            draft.cover_fields = {};
+            draft.revision_fields = {};
+            await save();
+          },
+        },
+      }),
+      button('Save document fields', { class: 'btn btn-primary', on: { click: save } }),
+    ],
+    'Set in Settings for the practice as a whole; overridden here for this job only.'
   ));
 }
 

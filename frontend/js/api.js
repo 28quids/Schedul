@@ -90,6 +90,8 @@ export const api = {
     audit: (id, bid) => request('GET', `/api/projects/${id}/buildings/${bid}/audit`),
 
     bulkRevision: (id, body) => request('POST', `/api/projects/${id}/revisions/bulk`, body),
+    branding: (id) => request('GET', `/api/projects/${id}/branding`),
+    setBranding: (id, body) => request('PUT', `/api/projects/${id}/branding`, body),
     columns: (id, code) => request('GET', `/api/projects/${id}/columns/${code}`),
     setColumns: (id, body) => request('PUT', `/api/projects/${id}/columns`, body),
   },
@@ -97,6 +99,7 @@ export const api = {
   schedules: {
     grid: (id) => request('GET', `/api/schedules/${id}`),
     addRow: (id, values) => request('POST', `/api/schedules/${id}/rows`, { values }),
+    addRows: (id, count) => request('POST', `/api/schedules/${id}/rows/many`, { count }),
     updateRow: (id, rowId, values, overrides) =>
       request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values, overrides }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),
@@ -110,6 +113,30 @@ export const api = {
     pastePreview: (id, body) =>
       request('POST', `/api/schedules/${id}/rows/paste/preview`, body),
     fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
+    columns: (id) => request('GET', `/api/schedules/${id}/columns`),
+
+    // The working file: the typed columns only, out and back.
+    rowsUrl: (id, filled = true) =>
+      `/api/schedules/${id}/rows.xlsx${filled ? '' : '?filled=false'}`,
+    importRows: async (id, file, { mode = 'append', apply = false, confirm = false } = {}) => {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('mode', mode);
+      form.append('apply', apply ? 'true' : 'false');
+      form.append('confirm', confirm ? 'true' : 'false');
+      const response = await fetch(`/api/schedules/${id}/rows/workbook`, {
+        method: 'POST', body: form,
+      });
+      const text = await response.text();
+      let payload = null;
+      if (text) { try { payload = JSON.parse(text); } catch { payload = text; } }
+      if (!response.ok) {
+        throw new ApiError(describe(payload, response.status), response.status, payload);
+      }
+      return payload;
+    },
+    setColumns: (id, columns) =>
+      request('PUT', `/api/schedules/${id}/columns`, { columns }),
     notes: (id) => request('GET', `/api/schedules/${id}/notes`),
     setNotes: (id, notes) => request('PUT', `/api/schedules/${id}/notes`, { notes }),
     customiseNotes: (id) => request('POST', `/api/schedules/${id}/notes/customise`),
@@ -160,6 +187,32 @@ export const api = {
     setState: (id, state) => request('POST', `/api/library/review/${id}/${state}`),
     resolveFlag: (id) => request('POST', `/api/library/review/flags/${id}/resolve`),
     remove: (id) => request('DELETE', `/api/library/${id}`),
+
+    // The workbook round trip. `workbookUrl` is a download rather than a fetch,
+    // so it is a URL rather than a call; the import posts the file back.
+    workbookUrl: (code = '', data = true) => {
+      const params = new URLSearchParams();
+      if (code) params.set('code', code);
+      if (!data) params.set('data', 'false');
+      const query = params.toString();
+      return `/api/library/workbook.xlsx${query ? `?${query}` : ''}`;
+    },
+    importWorkbook: async (file, { apply = false, updateExisting = true } = {}) => {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('apply', apply ? 'true' : 'false');
+      form.append('update_existing', updateExisting ? 'true' : 'false');
+      const response = await fetch('/api/library/workbook/import', {
+        method: 'POST', body: form,
+      });
+      const text = await response.text();
+      let payload = null;
+      if (text) { try { payload = JSON.parse(text); } catch { payload = text; } }
+      if (!response.ok) {
+        throw new ApiError(describe(payload, response.status), response.status, payload);
+      }
+      return payload;
+    },
   },
 
   impact: (area = '') => request('GET', `/api/impact${area ? `?area=${area}` : ''}`),
@@ -170,6 +223,7 @@ export const api = {
   settings: {
     read: () => request('GET', '/api/settings'),
     update: (body) => request('PUT', '/api/settings', body),
+    storage: () => request('GET', '/api/settings/storage'),
     branding: () => request('GET', '/api/settings/branding'),
     previewBranding: (branding) =>
       request('POST', '/api/settings/branding/preview', { branding }),

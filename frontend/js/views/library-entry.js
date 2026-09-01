@@ -12,8 +12,8 @@
 
 import { api } from '../api.js';
 import {
-  button, card, clear, confirmDialog, el, empty, fail, field, input, modal,
-  notice, pill, select, show, table, toast,
+  button, card, clear, confirmDialog, download, el, empty, fail, field, input,
+  modal, notice, pill, select, show, table, toast,
 } from '../ui.js';
 import { parseTsv } from '../grid/clipboard.js';
 
@@ -263,6 +263,69 @@ function filled(row) {
  * plan comes from the server — the same planner that carries the import out —
  * so what is confirmed is what happens.
  */
+/**
+ * The columns this type takes, as a table with the headings in it.
+ *
+ * A list of column names in a sentence is something to read; a header row is
+ * something to copy. This is the same row the blank workbook carries, so
+ * pasting it into a new spreadsheet, filling in underneath and pasting the lot
+ * back is a route that works without anybody being told about it.
+ */
+function headerTable(code, columns) {
+  const headerLine = columns.join('\t');
+  return el('section', { class: 'panel' }, [
+    el('div', { class: 'panel-head' }, [
+      el('strong', { text: `What ${code} products carry` }),
+      el('div', { class: 'btn-row' }, [
+        button('Copy headings', {
+          class: 'btn btn-sm',
+          title: 'Paste them into a blank spreadsheet and fill in underneath',
+          on: {
+            click: async () => {
+              try {
+                await navigator.clipboard.writeText(headerLine);
+                toast('Headings copied — paste them into row 1 of a new sheet', 'ok');
+              } catch {
+                toast('Your browser would not let the page copy. Use the workbook instead.', 'err');
+              }
+            },
+          },
+        }),
+        button('Blank workbook', {
+          class: 'btn btn-sm',
+          title: 'An .xlsx with these headings and an example row, ready to fill in',
+          on: { click: () => download(api.library.workbookUrl(code, false)) },
+        }),
+        button(`Export ${code}`, {
+          class: 'btn btn-sm',
+          title: 'The same file with what is already in the library in it',
+          on: { click: () => download(api.library.workbookUrl(code, true)) },
+        }),
+      ]),
+    ]),
+    el('div', { class: 'table-wrap', style: 'max-height:120px' }, [
+      el('table', { class: 'headings' }, [
+        el('thead', {}, [
+          el('tr', {}, columns.map((c, i) => el('th', {
+            class: i === 0 ? 'key' : '',
+            text: c,
+          }))),
+        ]),
+        el('tbody', {}, [
+          el('tr', {}, columns.map((c, i) => el('td', {
+            class: 'tiny muted',
+            text: i === 0 ? 'the lookup key' : '',
+          }))),
+        ]),
+      ]),
+    ]),
+    el('p', { class: 'muted tiny', style: 'margin-top:8px' }, [
+      'Column A is the key: two rows with the same reference are the same product, and ' +
+      'importing one that is already there updates it rather than adding a second.',
+    ]),
+  ]);
+}
+
 export async function importProducts(code) {
   let columns = [];
   try {
@@ -338,9 +401,11 @@ export async function importProducts(code) {
     wide: true,
     render: () => el('div', {}, [
       el('p', { class: 'muted' }, [
-        'Paste a block from a supplier’s spreadsheet. Nothing is written until you have ' +
-        'seen what it would do.',
+        'Paste a block from a supplier’s spreadsheet, or fill in the blank workbook and ' +
+        'bring it back. Nothing is written until you have seen what it would do.',
       ]),
+      headerTable(code, columns),
+      el('p', { class: 'muted tiny', style: 'margin:14px 0 4px' }, ['Or paste the rows here:']),
       area,
       el('label', { class: 'tiny', style: 'display:flex;gap:6px;margin-top:10px;align-items:center' }, [
         updateExisting,
@@ -472,4 +537,160 @@ async function showSummary(applied) {
       ]),
     ]),
   });
+}
+
+/* ----------------------------------------------------- workbook import --- */
+
+/**
+ * Bring a filled-in workbook back, one sheet per type.
+ *
+ * This is the mass route the paste importer cannot be: export everything,
+ * correct it in Excel where correcting a hundred rows is a drag of the fill
+ * handle, and put it back. The plan comes from the server per sheet, and a tab
+ * whose name does not match a type is reported rather than guessed at —
+ * importing a hundred radiators into the fan coil library because somebody
+ * renamed a tab is not a recoverable mistake.
+ */
+export async function importWorkbook() {
+  const picker = el('input', { type: 'file', accept: '.xlsx,.xlsm' });
+  const updateExisting = el('input', { type: 'checkbox', checked: true });
+  const summary = el('div');
+  let plan = null;
+
+  const refresh = async () => {
+    const file = picker.files && picker.files[0];
+    if (!file) { clear(summary); plan = null; return; }
+    clear(summary).appendChild(el('div', { class: 'muted', text: 'Reading the workbook…' }));
+    try {
+      plan = await api.library.importWorkbook(file, {
+        apply: false, updateExisting: updateExisting.checked,
+      });
+      clear(summary).appendChild(renderWorkbookPlan(plan));
+    } catch (error) {
+      plan = null;
+      clear(summary).appendChild(notice(error.message, 'error'));
+    }
+  };
+  picker.addEventListener('change', refresh);
+  updateExisting.addEventListener('change', refresh);
+
+  const ok = await modal({
+    title: 'Import an equipment workbook',
+    wide: true,
+    render: () => el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'One sheet per equipment type, named after the type’s code, with the headings on ' +
+        'row 1. Export the library, fill it in, and bring the same file back.',
+      ]),
+      el('div', { class: 'btn-row', style: 'margin-bottom:12px' }, [
+        button('Blank workbook for every type', {
+          class: 'btn btn-sm',
+          on: { click: () => download(api.library.workbookUrl('', false)) },
+        }),
+        button('Export the whole library', {
+          class: 'btn btn-sm',
+          on: { click: () => download(api.library.workbookUrl('', true)) },
+        }),
+      ]),
+      field('Workbook', picker),
+      el('label', { class: 'tiny', style: 'display:flex;gap:6px;margin-top:10px;align-items:center' }, [
+        updateExisting,
+        'Update products already in the library where the workbook’s values differ',
+      ]),
+      summary,
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button('Import', { class: 'btn btn-primary', on: { click: () => close(true) } }),
+    ],
+  });
+  if (!ok || !plan) return 0;
+
+  if (!plan.can_apply) {
+    toast('Nothing to import — every row is already in the library or was skipped', 'err');
+    return 0;
+  }
+  if (plan.destructive) {
+    const confirmed = await confirmDialog({
+      title: `Overwrite ${plan.counts.update} existing product(s)?`,
+      message:
+        'Library values are read rather than copied, so changing a product changes every ' +
+        'schedule that uses it. Only the fields the workbook actually fills are touched.',
+      confirmLabel: 'Import and update',
+      danger: true,
+    });
+    if (!confirmed) return 0;
+  }
+
+  try {
+    const applied = await api.library.importWorkbook(picker.files[0], {
+      apply: true, updateExisting: updateExisting.checked,
+    });
+    await modal({
+      title: 'Import finished',
+      wide: true,
+      render: () => el('div', {}, [
+        notice(
+          `${applied.applied} product(s) written: ${applied.counts.create} added, ` +
+          `${applied.counts.update} updated. ${applied.counts.unchanged} were already ` +
+          `correct and ${applied.counts.skip} were skipped.`,
+          'ok'
+        ),
+        renderWorkbookPlan(applied),
+      ]),
+    });
+    return applied.applied;
+  } catch (error) { fail(error); return 0; }
+}
+
+function renderWorkbookPlan(plan) {
+  const parts = [];
+  const unknown = plan.sheets.filter((s) => !s.recognised);
+  if (unknown.length) {
+    parts.push(notice(
+      `${unknown.length} sheet(s) were left alone:`, 'warn',
+      unknown.map((s) => s.message)
+    ));
+  }
+
+  const known = plan.sheets.filter((s) => s.recognised);
+  if (!known.length) {
+    parts.push(notice('No sheet in that workbook matched an equipment type.', 'error'));
+    return el('div', {}, parts);
+  }
+
+  parts.push(table(
+    ['Sheet', 'New', 'To update', 'Already correct', 'Skipped'],
+    known.map((sheet) => el('tr', {}, [
+      el('td', {}, [
+        el('strong', { class: 'mono', text: sheet.sheet }),
+        sheet.warnings && sheet.warnings.length
+          ? el('div', { class: 'muted tiny', text: sheet.warnings.join(' · ') })
+          : null,
+      ]),
+      el('td', { class: 'tiny', text: String(sheet.counts.create) }),
+      el('td', { class: 'tiny', text: String(sheet.counts.update) }),
+      el('td', { class: 'tiny muted', text: String(sheet.counts.unchanged) }),
+      el('td', { class: 'tiny muted', text: String(sheet.counts.skip) }),
+    ]))
+  ));
+
+  const skipped = known.flatMap((s) =>
+    (s.rows || []).filter((r) => r.action === 'skip' && r.reason)
+      .map((r) => ({ sheet: s.sheet, ...r }))
+  );
+  if (skipped.length) {
+    parts.push(el('details', { style: 'margin-top:10px' }, [
+      el('summary', { class: 'tiny' }, [`${skipped.length} row(s) skipped — why`]),
+      table(
+        ['Sheet', 'Model reference', 'Why'],
+        skipped.slice(0, 40).map((r) => el('tr', {}, [
+          el('td', { class: 'tiny muted', text: r.sheet }),
+          el('td', { class: 'mono tiny', text: r.model_reference || '—' }),
+          el('td', { class: 'tiny', text: r.reason }),
+        ]))
+      ),
+    ]));
+  }
+  return el('div', {}, parts);
 }

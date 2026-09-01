@@ -19,6 +19,7 @@ the product itself.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as _field
 from typing import Any, Iterable, Sequence
 
@@ -30,13 +31,27 @@ from ..core.tabular import Block, map_columns, read_block, rows_to_values
 from ..db.models import Equipment
 from .library import keynorm, norm, save_equipment
 
-__all__ = ["RowPlan", "ImportPlan", "plan_import", "apply_import", "target_columns"]
+__all__ = [
+    "RowPlan", "ImportPlan", "plan_import", "apply_import", "target_columns",
+    "is_template_example",
+]
 
 #: What an import may do to one row.
 CREATE = "create"
 UPDATE = "update"
 UNCHANGED = "unchanged"
 SKIP = "skip"
+
+
+#: The reference the blank template puts in its example row. It is scaffolding
+#: rather than a product, and importing the template unedited should add nothing.
+_EXAMPLE = re.compile(r"^(?P<code>[A-Z0-9]+)-EXAMPLE-\d+$", re.IGNORECASE)
+
+
+def is_template_example(reference: str, type_code: str) -> bool:
+    """Whether this row is the exported template's own example row."""
+    match = _EXAMPLE.match(str(reference or "").strip())
+    return bool(match) and match.group("code").upper() == str(type_code).upper()
 
 
 def target_columns(schedule_type: ScheduleType) -> list[str]:
@@ -184,6 +199,11 @@ def plan_import(
 
         if not reference:
             row.reason = f"no {MODEL_REFERENCE}, so there is nothing to key this on"
+            plan.rows.append(row)
+            continue
+
+        if is_template_example(reference, schedule_type.code):
+            row.reason = "the template's own example row, not a product"
             plan.rows.append(row)
             continue
 

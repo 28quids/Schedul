@@ -5,10 +5,13 @@ from __future__ import annotations
 import pytest
 
 from schedul.core.references import (
+    digit_runs,
     fill_series,
     is_incrementable,
+    next_in_column,
     next_reference,
     split_reference,
+    varying_run,
 )
 
 
@@ -28,7 +31,20 @@ class TestSplit:
     @pytest.mark.parametrize("value", ["RAD", "", "L02 Plantroom", "RAD-01a"])
     def test_no_trailing_number(self, value):
         assert split_reference(value) is None
+
+    @pytest.mark.parametrize("value", ["RAD", "", "Roof Plantroom"])
+    def test_no_number_at_all_does_not_count(self, value):
         assert is_incrementable(value) is False
+
+    @pytest.mark.parametrize("value", ["L02 Plantroom", "RAD-01a", "RM0.01 2 Bedroom"])
+    def test_a_number_anywhere_counts(self, value):
+        """A number that is not at the end is still a number somebody counts.
+
+        'RM0.01 2 Bedroom' repeated two hundred times is not what dragging a
+        room reference down means, and refusing to count it because of the word
+        after it was the reason people gave up on the fill and used Excel.
+        """
+        assert is_incrementable(value) is True
 
 
 class TestNext:
@@ -77,3 +93,83 @@ class TestFill:
     def test_an_unknown_mode_is_rejected(self):
         with pytest.raises(ValueError):
             fill_series("RAD-001", 2, mode="nonsense")
+
+
+class TestWhichNumberCounts:
+    """A value can hold several numbers. Which one a fill counts is the question.
+
+    One seed cannot say, so the last run wins, which is what a spreadsheet does.
+    Two seeds can say, and then they decide.
+    """
+
+    def test_the_last_number_counts_by_default(self):
+        assert fill_series("RM0.01 2 Bedroom", 2) == [
+            "RM0.01 3 Bedroom", "RM0.01 4 Bedroom"
+        ]
+
+    def test_a_chosen_run_counts_instead(self):
+        assert fill_series("RM0.01 2 Bedroom", 3, index=1) == [
+            "RM0.02 2 Bedroom", "RM0.03 2 Bedroom", "RM0.04 2 Bedroom"
+        ]
+
+    def test_two_seeds_say_which_number_varies(self):
+        assert varying_run(["RM0.01 2 Bedroom", "RM0.02 2 Bedroom"]) == 1
+        assert varying_run(["RAD-001", "RAD-002"]) == 0
+
+    def test_seeds_that_differ_in_two_places_say_nothing(self):
+        assert varying_run(["A1-1", "A2-2"]) is None
+
+    def test_one_seed_says_nothing(self):
+        assert varying_run(["RAD-001"]) is None
+        assert varying_run([]) is None
+
+    def test_seeds_of_different_shapes_say_nothing(self):
+        assert varying_run(["RAD-001", "Level 2 Room 3"]) is None
+
+    def test_the_runs_of_a_value_are_found_left_to_right(self):
+        assert digit_runs("RM0.01 2 Bedroom") == [(2, 3), (4, 6), (7, 8)]
+        assert digit_runs("no numbers") == []
+
+    def test_padding_is_kept_wherever_the_run_sits(self):
+        assert fill_series("RM0.09 2 Bed", 2, index=1) == [
+            "RM0.10 2 Bed", "RM0.11 2 Bed"
+        ]
+
+    def test_counting_backwards_stops_rather_than_going_negative(self):
+        assert fill_series("RAD-001", 3, step=-1) == ["RAD-000", "RAD-000", "RAD-000"]
+
+
+class TestTheNextReferenceDownAColumn:
+    """What to offer on a new row, read from the column rather than imposed.
+
+    A practice numbers its units its own way — MVHR-001 on the ground floor and
+    MVHR-101 on the first is one convention among many — so the suggestion is
+    only ever the pattern the column is already showing.
+    """
+
+    def test_it_counts_on_from_the_last_value(self):
+        assert next_in_column(["MVHR-001", "MVHR-002"]) == "MVHR-003"
+
+    def test_a_new_numbering_changes_what_is_offered(self):
+        assert next_in_column(["MVHR-001", "MVHR-002", "MVHR-101"]) == "MVHR-102"
+
+    def test_it_follows_which_number_the_column_is_counting(self):
+        assert next_in_column(
+            ["RM0.01 2 Bedroom", "RM0.02 2 Bedroom"]
+        ) == "RM0.03 2 Bedroom"
+
+    def test_an_empty_column_offers_nothing(self):
+        assert next_in_column([]) is None
+        assert next_in_column(["", None]) is None
+
+    def test_a_value_with_no_number_offers_nothing(self):
+        assert next_in_column(["Roof Plantroom"]) is None
+
+    def test_it_never_offers_a_duplicate(self):
+        # Counting on from RAD-001 in a column that already holds RAD-002 would
+        # be offering to make a duplicate reference, which is worse than
+        # offering nothing at all.
+        assert next_in_column(["RAD-002", "RAD-001"]) is None
+
+    def test_gaps_and_blanks_are_ignored(self):
+        assert next_in_column(["RAD-001", "", "RAD-002", None]) == "RAD-003"

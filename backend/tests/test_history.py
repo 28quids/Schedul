@@ -281,3 +281,240 @@ class TestRangeFill:
         assert response.status_code == 400
         grid = client.get(f"/api/schedules/{schedule}").json()
         assert refs(grid) == ["A", None], "a refused fill changes nothing at all"
+
+
+class TestDraggingTheFillHandle:
+    """What the corner handle asks the server to do.
+
+    The increment rule stays in ``core.references`` -- the browser sends a
+    direction and a count, not a list of values -- so a drag, a toolbar button
+    and an importer all produce the same references.
+    """
+
+    def test_dragging_down_counts_up(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 2,
+            "mode": "series", "direction": "down",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-002", "RAD-003"]
+
+    def test_dragging_up_counts_down(self, client, schedule):
+        for _ in range(2):
+            add(client, schedule)
+        add(client, schedule, **{"Unit Reference": "RAD-005"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 2, "count": 2,
+            "mode": "series", "direction": "up",
+        }).json()
+        assert refs(grid) == ["RAD-003", "RAD-004", "RAD-005"], (
+            "dragging a reference upwards counts down, as a spreadsheet does"
+        )
+
+    def test_holding_ctrl_copies_instead(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 1,
+            "mode": "copy", "direction": "down",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-001"]
+
+    def test_a_drag_is_one_undo(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        for _ in range(3):
+            add(client, schedule)
+        client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 3,
+            "mode": "series",
+        })
+        grid = client.post(f"/api/schedules/{schedule}/undo").json()
+        assert refs(grid) == ["RAD-001", None, None, None]
+
+
+class TestOverridingASelection:
+    """Taking several library cells over in one step.
+
+    A row that diverges from the library usually diverges in company, and one
+    pencil at a time is the difference between a feature people use and one they
+    work around.
+    """
+
+    def _with_products(self, client, schedule):
+        client.post("/api/library", json={
+            "type_code": "MVHR",
+            "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Width (mm)": 900},
+        })
+        first = add(client, schedule, **{
+            "Unit Reference": "MVHR-01", "Model Reference": "SYS-VSR-500",
+        })
+        add(client, schedule, **{
+            "Unit Reference": "MVHR-02", "Model Reference": "SYS-VSR-500",
+        })
+        return client.get(f"/api/schedules/{schedule}").json()
+
+    def test_a_block_of_library_cells_is_taken_over_at_once(self, client, schedule):
+        grid = self._with_products(client, schedule)
+        edits = [
+            {
+                "row_id": row["id"],
+                "values": {},
+                "overrides": {"Width (mm)": row["computed"]["Width (mm)"]},
+            }
+            for row in grid["rows"]
+        ]
+        after = client.post(f"/api/schedules/{schedule}/rows/cells", json={
+            "edits": edits, "action": "override_cells",
+        }).json()
+        assert all("Width (mm)" in r["overrides"] for r in after["rows"])
+        assert after["history"]["can_undo"], "a bulk override is one undoable step"
+
+    def test_restoring_the_block_puts_every_cell_back_on_the_library(
+        self, client, schedule
+    ):
+        grid = self._with_products(client, schedule)
+        client.post(f"/api/schedules/{schedule}/rows/cells", json={
+            "edits": [
+                {"row_id": r["id"], "values": {}, "overrides": {"Width (mm)": 1234}}
+                for r in grid["rows"]
+            ],
+            "action": "override_cells",
+        })
+        after = client.post(f"/api/schedules/{schedule}/rows/cells", json={
+            "edits": [
+                {"row_id": r["id"], "values": {}, "overrides": {"Width (mm)": ""}}
+                for r in grid["rows"]
+            ],
+            "action": "restore_cells",
+        }).json()
+        assert all(not r["overrides"] for r in after["rows"])
+        assert all(r["computed"]["Width (mm)"] == 900 for r in after["rows"])
+
+
+class TestWhichNumberTheFillCounts:
+    """A room reference holds two numbers, and only one of them is the room."""
+
+    def test_one_seed_counts_the_last_number(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RM0.01 2 Bedroom"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid) == [
+            "RM0.01 2 Bedroom", "RM0.01 3 Bedroom", "RM0.01 4 Bedroom"
+        ]
+
+    def test_two_seeds_say_which_number_is_the_room(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RM0.01 2 Bedroom"})
+        add(client, schedule, **{"Unit Reference": "RM0.02 2 Bedroom"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid) == [
+            "RM0.01 2 Bedroom", "RM0.02 2 Bedroom",
+            "RM0.03 2 Bedroom", "RM0.04 2 Bedroom",
+        ], "the bed count is not a series and must be left alone"
+
+    def test_two_seeds_also_say_by_how_much(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule, **{"Unit Reference": "RAD-003"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-003", "RAD-005", "RAD-007"]
+
+    def test_a_chosen_run_overrides_what_was_inferred(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RM0.01 2 Bedroom"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+            "index": 1,
+        }).json()
+        assert refs(grid) == ["RM0.01 2 Bedroom", "RM0.02 2 Bedroom"]
+
+    def test_fill_down_still_means_the_top_cell_into_all_of_them(self, client, schedule):
+        # Copy is never inferred: two filled cells at the top of a Fill down are
+        # two cells about to be overwritten, not a pattern.
+        add(client, schedule, **{"Unit Reference": "A"})
+        add(client, schedule, **{"Unit Reference": "B"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "copy",
+        }).json()
+        assert refs(grid) == ["A", "A", "A"]
+
+    def test_a_gap_ends_the_pattern(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule)
+        add(client, schedule, **{"Unit Reference": "SOMETHING ELSE"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid)[:2] == ["RAD-001", "RAD-002"], (
+            "reading past a gap would count from an unrelated block of values"
+        )
+
+    def test_a_fully_filled_range_still_recounts_from_the_top(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule, **{"Unit Reference": "WRONG"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 1,
+            "mode": "series",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-002"]
+
+
+class TestWhatTheEditorIsOfferedBack:
+    """The grid carries what the schedule already says, for the editor to offer.
+
+    It travels with the grid rather than on an endpoint of its own because it is
+    only a reading of the rows that came with it -- a suggestion made from a
+    stale reading is one that puts back a value somebody has just corrected.
+    """
+
+    def test_a_column_offers_what_has_been_typed_in_it(self, client, schedule):
+        for location in ("Cupboard", "Cupboard", "Riser"):
+            add(client, schedule, **{"Location": location})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]["Location"]
+        assert offered["values"] == ["Cupboard", "Riser"], "most-used first"
+        assert offered["counts"] == {"Cupboard": 2, "Riser": 1}
+
+    def test_the_reference_column_offers_the_next_one(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "MVHR-001"})
+        add(client, schedule, **{"Unit Reference": "MVHR-002"})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Unit Reference"]["next"] == "MVHR-003"
+
+    def test_it_follows_a_change_of_numbering(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "MVHR-001"})
+        add(client, schedule, **{"Unit Reference": "MVHR-101"})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Unit Reference"]["next"] == "MVHR-102", (
+            "the first floor starting at 101 is the practice's convention, not ours"
+        )
+
+    def test_an_empty_schedule_offers_nothing(self, client, schedule):
+        add(client, schedule)
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Unit Reference"] == {"values": [], "counts": {}, "next": None}
+
+    def test_the_model_reference_is_offered_like_any_other_input(self, client, schedule):
+        add(client, schedule, **{"Model Reference": "SYS-VSR-500"})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Model Reference"]["values"] == ["SYS-VSR-500"]
+
+    def test_calculated_columns_are_not_offered(self, client, schedule):
+        add(client, schedule, **{"Supply Airflow (l/s)": 450})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert "Total Airflow (l/s)" not in offered, (
+            "a calculated column is not somewhere anybody types"
+        )
