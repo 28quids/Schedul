@@ -392,3 +392,82 @@ class TestOverridingASelection:
         }).json()
         assert all(not r["overrides"] for r in after["rows"])
         assert all(r["computed"]["Width (mm)"] == 900 for r in after["rows"])
+
+
+class TestWhichNumberTheFillCounts:
+    """A room reference holds two numbers, and only one of them is the room."""
+
+    def test_one_seed_counts_the_last_number(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RM0.01 2 Bedroom"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid) == [
+            "RM0.01 2 Bedroom", "RM0.01 3 Bedroom", "RM0.01 4 Bedroom"
+        ]
+
+    def test_two_seeds_say_which_number_is_the_room(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RM0.01 2 Bedroom"})
+        add(client, schedule, **{"Unit Reference": "RM0.02 2 Bedroom"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid) == [
+            "RM0.01 2 Bedroom", "RM0.02 2 Bedroom",
+            "RM0.03 2 Bedroom", "RM0.04 2 Bedroom",
+        ], "the bed count is not a series and must be left alone"
+
+    def test_two_seeds_also_say_by_how_much(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule, **{"Unit Reference": "RAD-003"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-003", "RAD-005", "RAD-007"]
+
+    def test_a_chosen_run_overrides_what_was_inferred(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RM0.01 2 Bedroom"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+            "index": 1,
+        }).json()
+        assert refs(grid) == ["RM0.01 2 Bedroom", "RM0.02 2 Bedroom"]
+
+    def test_fill_down_still_means_the_top_cell_into_all_of_them(self, client, schedule):
+        # Copy is never inferred: two filled cells at the top of a Fill down are
+        # two cells about to be overwritten, not a pattern.
+        add(client, schedule, **{"Unit Reference": "A"})
+        add(client, schedule, **{"Unit Reference": "B"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "copy",
+        }).json()
+        assert refs(grid) == ["A", "A", "A"]
+
+    def test_a_gap_ends_the_pattern(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule)
+        add(client, schedule, **{"Unit Reference": "SOMETHING ELSE"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "mode": "series",
+        }).json()
+        assert refs(grid)[:2] == ["RAD-001", "RAD-002"], (
+            "reading past a gap would count from an unrelated block of values"
+        )
+
+    def test_a_fully_filled_range_still_recounts_from_the_top(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule, **{"Unit Reference": "WRONG"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 1,
+            "mode": "series",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-002"]

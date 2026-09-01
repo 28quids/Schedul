@@ -13,7 +13,7 @@ __all__ = [
     "ScheduleIn", "ScheduleOut",
     "RowIn", "RowOut", "GridOut", "GridColumn",
     "PasteIn", "PastePreviewIn", "CellEdit", "CellsIn", "DeleteRowsIn", "FillIn",
-    "ScheduleNotesIn",
+    "ScheduleNotesIn", "AddRowsIn",
     "RevisionIn", "RevisionOut",
     "EquipmentIn", "EquipmentOut", "LibraryImportIn", "BulkEquipmentIn",
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
@@ -252,6 +252,12 @@ class RowIn(BaseModel):
     overrides: dict[str, Any] | None = None
 
 
+class AddRowsIn(BaseModel):
+    """How many empty rows to add at the end, as one undoable step."""
+
+    count: int = 1
+
+
 class PasteIn(BaseModel):
     """Rows pasted from a spreadsheet, and what to do with them.
 
@@ -328,6 +334,10 @@ class FillIn(BaseModel):
     #: Which way the fill runs. A spreadsheet's fill handle drags both ways, and
     #: dragging up from RAD-005 counts down rather than repeating it.
     direction: Literal["down", "up"] = "down"
+    #: Which run of digits in the value counts, from the left; -1 is the last,
+    #: which is what a spreadsheet does. Omit to work it out from the cells that
+    #: are already filled, and fall back to the last run when they do not say.
+    index: int | None = None
 
     @property
     def target_columns(self) -> list[str]:

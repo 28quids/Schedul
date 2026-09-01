@@ -99,6 +99,7 @@ export const api = {
   schedules: {
     grid: (id) => request('GET', `/api/schedules/${id}`),
     addRow: (id, values) => request('POST', `/api/schedules/${id}/rows`, { values }),
+    addRows: (id, count) => request('POST', `/api/schedules/${id}/rows/many`, { count }),
     updateRow: (id, rowId, values, overrides) =>
       request('PUT', `/api/schedules/${id}/rows/${rowId}`, { values, overrides }),
     deleteRow: (id, rowId) => request('DELETE', `/api/schedules/${id}/rows/${rowId}`),

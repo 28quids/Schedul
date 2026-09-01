@@ -26,11 +26,12 @@ from ...services import history as hist
 from ...services import notes as notes_svc
 from ...services.grid import build_grid, editable_payload, override_payload
 from ..deps import current_org, get_db, get_schedule, schedule_view
-from ...core.references import fill_series
+from ...core import references
+from ...core.references import fill_series, varying_run
 from ...core import tabular
 from ..schemas import (
-    CellsIn, ColumnVisibilityIn, DeleteRowsIn, FillIn, GridColumn, GridOut, PasteIn,
-    PastePreviewIn, RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
+    AddRowsIn, CellsIn, ColumnVisibilityIn, DeleteRowsIn, FillIn, GridColumn, GridOut,
+    PasteIn, PastePreviewIn, RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
 )
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -154,6 +155,35 @@ def add_row(
     session.flush()
     session.expire(schedule, ["rows"])
     hist.record_edit(session, schedule, "add_row", before, summary="added a row")
+    return _grid(session, schedule, org)
+
+
+@router.post("/{schedule_id}/rows/many", response_model=GridOut, status_code=201)
+def add_rows(
+    payload: AddRowsIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> GridOut:
+    """Add several empty rows at once, as one undoable step.
+
+    Fifty rows one Enter at a time is how somebody ends up building the schedule
+    in Excel instead. One step rather than fifty also means one entry in the
+    undo stack: adding fifty rows by mistake takes one Ctrl+Z to put right.
+    """
+    if not 1 <= payload.count <= 500:
+        raise HTTPException(
+            status_code=400, detail="between 1 and 500 rows can be added at once"
+        )
+    before = hist.snapshot_rows(schedule)
+    position = max((r.position for r in schedule.rows), default=-1) + 1
+    for offset in range(payload.count):
+        session.add(ScheduleRow(schedule_id=schedule.id, position=position + offset))
+    session.flush()
+    session.expire(schedule, ["rows"])
+    hist.record_edit(
+        session, schedule, "add_rows", before, summary=f"{payload.count} rows added"
+    )
     return _grid(session, schedule, org)
 
 
@@ -500,9 +530,38 @@ def fill_down(
 
     before = hist.snapshot_rows(schedule)
     for key in keys:
-        seed = (ordered[start].values or {}).get(key, "")
-        filled = fill_series(seed, len(target), mode=payload.mode, step=step)
-        for row, value in zip(target, filled):
+        window = [ordered[start], *target]
+        seeds = _leading_values(window, key)
+
+        # Two filled cells say what one cannot: which number in the value is the
+        # one that counts, and by how much. 'RM0.01 2 Bedroom' alone could count
+        # either number; alongside 'RM0.02 2 Bedroom' it plainly counts the room
+        # and leaves the bed count alone. A copy is never inferred -- Fill down
+        # means the top cell into all of them, whatever is already there.
+        # A range that is already full end to end has no empty cells to infer
+        # for, and somebody filling it means "recount it from the top" -- so
+        # that falls back to one seed over the lot rather than doing nothing.
+        infer = (
+            payload.mode == "series"
+            and payload.index is None
+            and 1 < len(seeds) < len(window)
+        )
+        pattern = seeds if infer else seeds[:1]
+        rest = window[len(pattern):] if infer else target
+
+        index = payload.index if payload.index is not None else -1
+        row_step = step
+        if infer:
+            found = varying_run(pattern)
+            if found is not None:
+                index = found
+            row_step = _inferred_step(pattern, index) or step
+
+        seed = (pattern[-1] if pattern else "")
+        filled = fill_series(
+            seed, len(rest), mode=payload.mode, step=row_step, index=index
+        )
+        for row, value in zip(rest, filled):
             row.values = {**(row.values or {}), key: value}
 
     session.flush()
@@ -512,6 +571,40 @@ def fill_down(
         summary=f"filled {len(target)} row(s)",
     )
     return _grid(session, schedule, org)
+
+
+def _leading_values(rows, key: str) -> list:
+    """The run of filled values at the start of a window, and no further.
+
+    A gap ends the pattern. Reading past one would treat two unrelated blocks of
+    values as a single series and count from the wrong place.
+    """
+    out = []
+    for row in rows:
+        value = (row.values or {}).get(key, "")
+        if value in (None, ""):
+            break
+        out.append(value)
+    return out
+
+
+def _inferred_step(values, index: int) -> int | None:
+    """By how much the counted number moves between the last two seeds.
+
+    ``RAD-001, RAD-003`` counts in twos, as a spreadsheet does. None when the
+    two cannot be read as numbers at all.
+    """
+    if len(values) < 2:
+        return None
+    try:
+        runs = [references.digit_runs(v) for v in values[-2:]]
+        numbers = [
+            int(str(v)[run[index][0]:run[index][1]])
+            for v, run in zip(values[-2:], runs)
+        ]
+    except (IndexError, ValueError):
+        return None
+    return (numbers[1] - numbers[0]) or None
 
 
 # ------------------------------------------------------------------ undo ---

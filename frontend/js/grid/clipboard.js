@@ -31,44 +31,77 @@ export function parseTsv(text) {
 }
 
 /**
+ * How many times a copied block repeats to fill the selection it is dropped on.
+ *
+ * A spreadsheet's rule, and the one this was missing: copy one cell, select a
+ * column of eight, paste, and all eight take the value. It repeats only when
+ * the selection is a whole multiple of the block in both directions — a 2-row
+ * copy into a 5-row selection is not something to guess at, so that pastes once
+ * and says so.
+ */
+export function tiling({ height, width, selection }) {
+  if (!selection) return { down: 1, across: 1 };
+  const rows = Math.max(1, selection.bottom - selection.top + 1);
+  const columns = Math.max(1, selection.right - selection.left + 1);
+  const down = rows > height && rows % height === 0 ? rows / height : 1;
+  const across = columns > width && columns % width === 0 ? columns / width : 1;
+  return { down, across };
+}
+
+/**
  * What pasting `matrix` at `top,left` would do to the rows already there.
  *
  * `columns` is the grid's full column list; only the editable ones can receive
  * a value, so a block landing across a calculated column skips it rather than
  * shifting everything along — which would put values in the wrong fields.
  *
+ * `selection` is the rectangle the paste was aimed at. A block smaller than it
+ * repeats to fill it, as a spreadsheet does; without that, copying one cell and
+ * selecting the column below it wrote exactly one cell, which is the opposite
+ * of what the gesture means.
+ *
  * Returns edits ready for the cells endpoint, plus the counts a confirmation
  * needs: how many filled cells would be overwritten, and how many rows the
  * block runs past the end of the schedule.
  */
-export function planBlockPaste({ matrix, rows, columns, top, left }) {
-  const edits = [];
+export function planBlockPaste({ matrix, rows, columns, top, left, selection }) {
+  const edits = new Map();
   let overwritten = 0;
   let skipped = 0;
   let filled = 0;
 
-  matrix.forEach((line, dr) => {
+  const height = matrix.length;
+  const width = matrix.reduce((n, line) => Math.max(n, line.length), 0);
+  const repeat = tiling({ height, width, selection });
+  const totalHeight = height * repeat.down;
+
+  for (let dr = 0; dr < totalHeight; dr += 1) {
     const rowIndex = top + dr;
     const row = rows[rowIndex];
-    if (!row) return;  // counted as overflow below
+    if (!row) continue;  // counted as overflow below
+    const line = matrix[dr % height];
 
-    const values = {};
-    line.forEach((cell, dc) => {
-      const column = columns[left + dc];
-      if (!column) return;
-      if (!column.editable) { skipped += 1; return; }
-      const key = column.legacy_name;
-      const existing = row.values ? row.values[key] : undefined;
-      if (existing !== undefined && existing !== null && existing !== '') overwritten += 1;
-      values[key] = cell.trim();
-      filled += 1;
-    });
-    if (Object.keys(values).length) edits.push({ row_id: row.id, values });
-  });
+    const values = edits.get(row.id) || {};
+    for (let copy = 0; copy < repeat.across; copy += 1) {
+      line.forEach((cell, dc) => {
+        const column = columns[left + copy * width + dc];
+        if (!column) return;
+        if (!column.editable) { skipped += 1; return; }
+        const key = column.legacy_name;
+        const existing = row.values ? row.values[key] : undefined;
+        if (existing !== undefined && existing !== null && existing !== '') overwritten += 1;
+        values[key] = cell.trim();
+        filled += 1;
+      });
+    }
+    if (Object.keys(values).length) edits.set(row.id, values);
+  }
 
-  const overflow = Math.max(0, top + matrix.length - rows.length);
+  // Rows only run past the end when the block itself is taller than what is
+  // left. A repeat is bounded by the selection, which is bounded by the rows.
+  const overflow = Math.max(0, top + totalHeight - rows.length);
   return {
-    edits,
+    edits: [...edits].map(([row_id, values]) => ({ row_id, values })),
     overwritten,
     skipped,
     cells: filled,
@@ -76,8 +109,9 @@ export function planBlockPaste({ matrix, rows, columns, top, left }) {
     // The rows that run past the end, as row-shaped objects the append path can
     // send on to the schedule paste endpoint.
     overflowRows: matrix.slice(Math.max(0, rows.length - top)),
-    width: matrix.reduce((n, line) => Math.max(n, line.length), 0),
-    height: matrix.length,
+    width: width * repeat.across,
+    height: totalHeight,
+    repeated: repeat.down * repeat.across > 1,
   };
 }
 

@@ -690,3 +690,14 @@ table.headings td { white-space: nowrap; }
 }
 .chooser-row:last-child { border-bottom: none; }
 .chooser-row select { font-size: 12px; }
+
+/* The row count sits against the Add button, as one control rather than two. */
+.add-rows { display: flex; align-items: stretch; }
+.add-rows .btn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.add-rows .row-count {
+  width: 56px; border: 1px solid var(--grey-300); border-left: none;
+  border-top-right-radius: var(--radius); border-bottom-right-radius: var(--radius);
+  padding: 0 6px; font: inherit; font-size: 12px; text-align: center;
+  background: var(--white); color: var(--grey-800);
+}
+.add-rows .row-count:focus { outline: none; box-shadow: inset 0 0 0 2px var(--blue); }

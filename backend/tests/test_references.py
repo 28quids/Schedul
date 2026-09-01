@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from schedul.core.references import (
+    digit_runs,
     fill_series,
     is_incrementable,
     next_reference,
     split_reference,
+    varying_run,
 )
 
 
@@ -28,7 +30,20 @@ class TestSplit:
     @pytest.mark.parametrize("value", ["RAD", "", "L02 Plantroom", "RAD-01a"])
     def test_no_trailing_number(self, value):
         assert split_reference(value) is None
+
+    @pytest.mark.parametrize("value", ["RAD", "", "Roof Plantroom"])
+    def test_no_number_at_all_does_not_count(self, value):
         assert is_incrementable(value) is False
+
+    @pytest.mark.parametrize("value", ["L02 Plantroom", "RAD-01a", "RM0.01 2 Bedroom"])
+    def test_a_number_anywhere_counts(self, value):
+        """A number that is not at the end is still a number somebody counts.
+
+        'RM0.01 2 Bedroom' repeated two hundred times is not what dragging a
+        room reference down means, and refusing to count it because of the word
+        after it was the reason people gave up on the fill and used Excel.
+        """
+        assert is_incrementable(value) is True
 
 
 class TestNext:
@@ -77,3 +92,47 @@ class TestFill:
     def test_an_unknown_mode_is_rejected(self):
         with pytest.raises(ValueError):
             fill_series("RAD-001", 2, mode="nonsense")
+
+
+class TestWhichNumberCounts:
+    """A value can hold several numbers. Which one a fill counts is the question.
+
+    One seed cannot say, so the last run wins, which is what a spreadsheet does.
+    Two seeds can say, and then they decide.
+    """
+
+    def test_the_last_number_counts_by_default(self):
+        assert fill_series("RM0.01 2 Bedroom", 2) == [
+            "RM0.01 3 Bedroom", "RM0.01 4 Bedroom"
+        ]
+
+    def test_a_chosen_run_counts_instead(self):
+        assert fill_series("RM0.01 2 Bedroom", 3, index=1) == [
+            "RM0.02 2 Bedroom", "RM0.03 2 Bedroom", "RM0.04 2 Bedroom"
+        ]
+
+    def test_two_seeds_say_which_number_varies(self):
+        assert varying_run(["RM0.01 2 Bedroom", "RM0.02 2 Bedroom"]) == 1
+        assert varying_run(["RAD-001", "RAD-002"]) == 0
+
+    def test_seeds_that_differ_in_two_places_say_nothing(self):
+        assert varying_run(["A1-1", "A2-2"]) is None
+
+    def test_one_seed_says_nothing(self):
+        assert varying_run(["RAD-001"]) is None
+        assert varying_run([]) is None
+
+    def test_seeds_of_different_shapes_say_nothing(self):
+        assert varying_run(["RAD-001", "Level 2 Room 3"]) is None
+
+    def test_the_runs_of_a_value_are_found_left_to_right(self):
+        assert digit_runs("RM0.01 2 Bedroom") == [(2, 3), (4, 6), (7, 8)]
+        assert digit_runs("no numbers") == []
+
+    def test_padding_is_kept_wherever_the_run_sits(self):
+        assert fill_series("RM0.09 2 Bed", 2, index=1) == [
+            "RM0.10 2 Bed", "RM0.11 2 Bed"
+        ]
+
+    def test_counting_backwards_stops_rather_than_going_negative(self):
+        assert fill_series("RAD-001", 3, step=-1) == ["RAD-000", "RAD-000", "RAD-000"]
