@@ -114,6 +114,27 @@ export const api = {
       request('POST', `/api/schedules/${id}/rows/paste/preview`, body),
     fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
     columns: (id) => request('GET', `/api/schedules/${id}/columns`),
+
+    // The working file: the typed columns only, out and back.
+    rowsUrl: (id, filled = true) =>
+      `/api/schedules/${id}/rows.xlsx${filled ? '' : '?filled=false'}`,
+    importRows: async (id, file, { mode = 'append', apply = false, confirm = false } = {}) => {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('mode', mode);
+      form.append('apply', apply ? 'true' : 'false');
+      form.append('confirm', confirm ? 'true' : 'false');
+      const response = await fetch(`/api/schedules/${id}/rows/workbook`, {
+        method: 'POST', body: form,
+      });
+      const text = await response.text();
+      let payload = null;
+      if (text) { try { payload = JSON.parse(text); } catch { payload = text; } }
+      if (!response.ok) {
+        throw new ApiError(describe(payload, response.status), response.status, payload);
+      }
+      return payload;
+    },
     setColumns: (id, columns) =>
       request('PUT', `/api/schedules/${id}/columns`, { columns }),
     notes: (id) => request('GET', `/api/schedules/${id}/notes`),

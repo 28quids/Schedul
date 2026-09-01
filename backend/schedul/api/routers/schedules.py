@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import datetime as _dt
+import io
+import tempfile
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,13 +22,16 @@ from ...services.converters import (
     revisions_of,
     type_from_row,
 )
+from ...export.library import read_library_workbook, render_grid_workbook
 from ...services.columns import (
     TARGETS, columns_for, validate_visibility, visibility_view,
 )
 from ...services.issue import diff_snapshots, issue_revision
 from ...services import history as hist
 from ...services import notes as notes_svc
-from ...services.grid import build_grid, editable_payload, override_payload
+from ...services.grid import (
+    build_grid, editable_payload, override_payload, suggestions_for,
+)
 from ..deps import current_org, get_db, get_schedule, schedule_view
 from ...core import references
 from ...core.references import fill_series, varying_run
@@ -35,6 +42,8 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
+
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
@@ -79,6 +88,12 @@ def _grid(session: Session, schedule: Schedule, org: Organisation) -> GridOut:
         },
         history=hist.history_state(session, schedule.id),
         type_drift=_type_drift(schedule),
+        # What this schedule already says, for the editor to offer back. It
+        # travels with the grid rather than on its own endpoint because it is
+        # only ever a reading of the rows that came with it, and a suggestion
+        # made from a stale reading is a suggestion that puts back a value
+        # somebody has just corrected.
+        suggestions=suggestions_for(schedule.rows, stype),
     )
 
 
@@ -639,6 +654,116 @@ def redo_edit(
 
 
 # ----------------------------------------------------------------- notes ---
+
+
+# -------------------------------------------------------- the round trip ---
+
+
+@router.get("/{schedule_id}/rows.xlsx")
+def export_rows(
+    filled: bool = True,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> FileResponse:
+    """The columns somebody types into, as a spreadsheet with the headings on.
+
+    Not the deliverable -- that is ``export.xlsx``, and it carries the cover, the
+    revision page and every calculated column. This is the working file: the
+    typed columns only, so a hundred rows can be filled in wherever that is
+    quickest and brought straight back. ``filled=false`` gives the same file
+    empty, which is the blank one to hand somebody.
+
+    Library and calculated columns are deliberately absent. One is looked up and
+    the other is worked out, so either would come back as a stale copy of
+    something already known.
+    """
+    stype = columns_for(schedule)
+    columns = _editable_names(stype)
+    rows = (
+        [
+            {key: (r.values or {}).get(key) for key in columns}
+            for r in sorted(schedule.rows, key=lambda r: r.position)
+        ]
+        if filled
+        else []
+    )
+
+    name = f"{schedule.code}_rows{'' if filled else '_blank'}.xlsx"
+    tmp = Path(tempfile.mkdtemp(prefix="schedul-rows-"))
+    path = render_grid_workbook(
+        columns, rows, tmp / name,
+        sheet=schedule.code,
+        note=(
+            "These are the columns you type into. Product and calculated columns "
+            "are not here: one is looked up from the equipment library and the "
+            "other is worked out, so filling them in would be filling in a copy. "
+            "Add rows under the headings and bring the file back."
+        ),
+    )
+    return FileResponse(path, filename=name, media_type=XLSX_MEDIA)
+
+
+@router.post("/{schedule_id}/rows/workbook")
+async def import_rows(
+    file: UploadFile = File(...),
+    mode: str = Form("append"),
+    apply: bool = Form(False),
+    confirm: bool = Form(False),
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Read a filled-in workbook back onto this schedule.
+
+    The sheet becomes tab-separated text and is handed to the paste path the
+    browser already uses, so the counts somebody confirms, the header detection
+    and the refusal to replace a filled-in schedule unasked are the ones that
+    exist rather than a second set written for files.
+    """
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(
+            status_code=400,
+            detail="that is not an Excel workbook. Save it as .xlsx and try again.",
+        )
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="the file is empty")
+
+    try:
+        blocks = read_library_workbook(io.BytesIO(raw))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"that workbook could not be read: {exc}"
+        ) from exc
+    if not blocks:
+        raise HTTPException(
+            status_code=400,
+            detail="no sheet in that workbook had a heading row and data under it",
+        )
+
+    stype = columns_for(schedule)
+    text = str(blocks[0]["text"])
+    plan = _paste_plan(schedule, stype, mode=mode, text=text, header=True, position=0)
+    result: dict[str, object] = {
+        **plan.to_dict(),
+        "sheet": blocks[0]["sheet"],
+        "applied": 0,
+        # A workbook's first line is a heading row by construction rather than
+        # by guess, so the summary says it was read as one rather than leaving
+        # somebody wondering whether their headings became a row of data.
+        "header_detected": True,
+    }
+    if not apply:
+        return result
+
+    grid = paste_rows(
+        PasteIn(mode=mode, text=text, header=True, position=0, confirm=confirm),
+        schedule=schedule, session=session, org=org,
+    )
+    result["applied"] = plan.detected_rows
+    result["grid"] = grid.model_dump(mode="json")
+    return result
 
 
 # --------------------------------------------------------------- columns ---

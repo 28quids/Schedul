@@ -701,3 +701,8 @@ table.headings td { white-space: nowrap; }
   background: var(--white); color: var(--grey-800);
 }
 .add-rows .row-count:focus { outline: none; box-shadow: inset 0 0 0 2px var(--blue); }
+
+/* The offer to fill the rows that match. Wider than the fill chip because it
+   has to say what it would do before it does it. */
+.group-chip { max-width: 420px; gap: 10px; }
+.group-chip .tiny { color: var(--grey-700); }

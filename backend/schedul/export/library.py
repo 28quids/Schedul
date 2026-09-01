@@ -42,6 +42,7 @@ __all__ = [
     "sheet_name_for",
     "library_columns",
     "render_library_workbook",
+    "render_grid_workbook",
     "read_library_workbook",
 ]
 
@@ -66,6 +67,66 @@ def library_columns(schedule_type: ScheduleType) -> list[str]:
     the moment somebody filled it in.
     """
     return [MODEL_REFERENCE, *(c.legacy_name for c in schedule_type.library)]
+
+
+def render_grid_workbook(
+    columns: Sequence[str],
+    rows: Sequence[dict[str, Any]],
+    out_path: str | Path,
+    *,
+    sheet: str = "Schedule",
+    note: str = "",
+) -> Path:
+    """One sheet of headings with rows under them, in the same shape as above.
+
+    A schedule's typed columns, so filling one in can happen in Excel and come
+    back. Deliberately the same reader on the way home: a heading row, data
+    contiguous under it, and a blank line ending the block.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name_for(sheet)
+    _write_sheet(ws, columns, rows, note=note)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out)
+    return out
+
+
+def _write_sheet(
+    ws, columns: Sequence[str], rows: Sequence[dict[str, Any]], *, note: str = ""
+) -> None:
+    """The heading row, the data, the widths and the table. Used by both files."""
+    for i, heading in enumerate(columns, start=1):
+        cell = ws.cell(1, i, heading)
+        cell.font = _HDR_FONT
+        cell.fill = _HDR_FILL
+        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(i)].width = max(
+            14, min(len(heading) + 4, 40)
+        )
+    ws.column_dimensions["A"].width = 26
+    ws.row_dimensions[1].height = 30
+
+    for r, item in enumerate(rows, start=2):
+        for i, key in enumerate(columns, start=1):
+            ws.cell(r, i, item.get(key)).font = _BODY_FONT
+
+    if note:
+        # On the heading cell, never in a cell of its own: a sentence written
+        # under the data is a row as far as any reader is concerned.
+        ws["A1"].comment = Comment(note, "Schedul", width=320, height=120)
+
+    last = max(2, len(rows) + 1)
+    table = Table(
+        displayName=f"Block_{abs(hash(ws.title)) % 10**8}",
+        ref=f"A1:{get_column_letter(max(1, len(columns)))}{last}",
+    )
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleLight1", showRowStripes=True, showColumnStripes=False
+    )
+    ws.add_table(table)
+    ws.freeze_panes = "B2"
 
 
 def render_library_workbook(
@@ -172,12 +233,11 @@ def read_library_workbook(source: Any) -> list[dict[str, Any]]:
             while cells and cells[-1] == "":
                 cells.pop()
             if not cells or not any(cells):
-                # A blank row ends the block, exactly as Excel's own current
-                # region does. The template puts its instructions under one, and
-                # a sentence of guidance imported as a product reference is a
-                # nasty way to find that out.
-                if lines:
-                    break
+                # A blank row is skipped rather than treated as the end of the
+                # block: a schedule genuinely has empty rows in it, and stopping
+                # at the first would read back only the part above the first gap.
+                # Nothing is written under the data for this to run into -- the
+                # template's instructions are a comment on the heading cell.
                 continue
             lines.append("\t".join(cells))
         if len(lines) < 2:

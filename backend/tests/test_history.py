@@ -471,3 +471,50 @@ class TestWhichNumberTheFillCounts:
             "mode": "series",
         }).json()
         assert refs(grid) == ["RAD-001", "RAD-002"]
+
+
+class TestWhatTheEditorIsOfferedBack:
+    """The grid carries what the schedule already says, for the editor to offer.
+
+    It travels with the grid rather than on an endpoint of its own because it is
+    only a reading of the rows that came with it -- a suggestion made from a
+    stale reading is one that puts back a value somebody has just corrected.
+    """
+
+    def test_a_column_offers_what_has_been_typed_in_it(self, client, schedule):
+        for location in ("Cupboard", "Cupboard", "Riser"):
+            add(client, schedule, **{"Location": location})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]["Location"]
+        assert offered["values"] == ["Cupboard", "Riser"], "most-used first"
+        assert offered["counts"] == {"Cupboard": 2, "Riser": 1}
+
+    def test_the_reference_column_offers_the_next_one(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "MVHR-001"})
+        add(client, schedule, **{"Unit Reference": "MVHR-002"})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Unit Reference"]["next"] == "MVHR-003"
+
+    def test_it_follows_a_change_of_numbering(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "MVHR-001"})
+        add(client, schedule, **{"Unit Reference": "MVHR-101"})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Unit Reference"]["next"] == "MVHR-102", (
+            "the first floor starting at 101 is the practice's convention, not ours"
+        )
+
+    def test_an_empty_schedule_offers_nothing(self, client, schedule):
+        add(client, schedule)
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Unit Reference"] == {"values": [], "counts": {}, "next": None}
+
+    def test_the_model_reference_is_offered_like_any_other_input(self, client, schedule):
+        add(client, schedule, **{"Model Reference": "SYS-VSR-500"})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert offered["Model Reference"]["values"] == ["SYS-VSR-500"]
+
+    def test_calculated_columns_are_not_offered(self, client, schedule):
+        add(client, schedule, **{"Supply Airflow (l/s)": 450})
+        offered = client.get(f"/api/schedules/{schedule}").json()["suggestions"]
+        assert "Total Airflow (l/s)" not in offered, (
+            "a calculated column is not somewhere anybody types"
+        )

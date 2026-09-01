@@ -236,6 +236,9 @@ class GridOut(BaseModel):
     history: dict[str, Any] = Field(default_factory=dict)
     #: Set when the type has moved on since this schedule was built.
     type_drift: dict[str, Any] = Field(default_factory=dict)
+    #: Per input column: what has been typed in it before, and the reference
+    #: after the last one. Read from this schedule, never imposed on it.
+    suggestions: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScheduleNotesIn(BaseModel):

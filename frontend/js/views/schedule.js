@@ -493,10 +493,112 @@ async function restoreSelection() {
   } catch (error) { fail(error); }
 }
 
-/* ------------------------------------------------------------ placeholder --- */
-// Filled in below; declared here so the toolbar can reference them.
-function workbookDialog() {}
-function suggestReference() {}
+/* ------------------------------------------------- the schedule workbook --- */
+
+/**
+ * Take the schedule out as a spreadsheet, fill it in, bring it back.
+ *
+ * The other export is the deliverable — cover, revision page, calculated
+ * columns and all. This is the working file: the columns somebody types into,
+ * with the headings on row 1. Filling in a hundred rows is quicker where the
+ * fill handle and the keyboard are already familiar, and there is no reason the
+ * tool should insist otherwise.
+ *
+ * Product and calculated columns are not in it. One is looked up and the other
+ * is worked out, so a filled-in copy of either would be a stale copy of
+ * something the schedule already knows.
+ */
+async function workbookDialog() {
+  const picker = el('input', { type: 'file', accept: '.xlsx,.xlsm' });
+  const mode = select(
+    [
+      ['append', 'Add to the end (safe)'],
+      ['replace', 'Replace every row'],
+    ],
+    'append'
+  );
+  const summary = el('div');
+  let plan = null;
+
+  const refresh = async () => {
+    const file = picker.files && picker.files[0];
+    if (!file) { clear(summary); plan = null; return; }
+    clear(summary).appendChild(el('div', { class: 'muted', text: 'Reading the workbook…' }));
+    try {
+      plan = await api.schedules.importRows(view.id, file, { mode: mode.value });
+      clear(summary).appendChild(renderPastePlan(plan));
+    } catch (error) {
+      plan = null;
+      clear(summary).appendChild(notice(error.message, 'error'));
+    }
+  };
+  picker.addEventListener('change', refresh);
+  mode.addEventListener('change', refresh);
+
+  const ok = await modal({
+    title: 'This schedule in Excel',
+    wide: true,
+    render: () => el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'The columns you type into, with the headings on row 1. Product and calculated ',
+        'columns are left out — one is looked up from the equipment library and the other ',
+        'is worked out, so filling them in here would be filling in a copy.',
+      ]),
+      el('div', { class: 'btn-row', style: 'margin-bottom:14px' }, [
+        button('Download this schedule', {
+          title: 'What is on it now, ready to edit',
+          on: { click: () => download(api.schedules.rowsUrl(view.id, true)) },
+        }),
+        button('Blank workbook', {
+          title: 'The same headings with nothing under them',
+          on: { click: () => download(api.schedules.rowsUrl(view.id, false)) },
+        }),
+      ]),
+      field('Bring one back', picker),
+      el('div', { style: 'margin-top:12px' }, [
+        field(
+          'Where',
+          mode,
+          'A file you exported from this schedule and corrected comes back as a ' +
+          'replacement. Adding to the end is for rows that are new.'
+        ),
+      ]),
+      summary,
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button('Import', { class: 'btn btn-primary', on: { click: () => close(true) } }),
+    ],
+  });
+  if (!ok || !plan) return;
+
+  if (!plan.detected_rows) {
+    toast('No rows were found in that workbook', 'err');
+    return;
+  }
+  if (plan.destructive) {
+    const confirmed = await confirmDialog({
+      title: 'Replace every row?',
+      message:
+        `${plan.populated_removed} filled-in row(s) will be removed and replaced with the ` +
+        `${plan.detected_rows} row(s) in the workbook.`,
+      confirmLabel: 'Replace rows',
+      danger: true,
+      detail: el('p', { class: 'muted tiny' }, ['This can be undone with Ctrl+Z.']),
+    });
+    if (!confirmed) return;
+  }
+
+  try {
+    const applied = await api.schedules.importRows(view.id, picker.files[0], {
+      mode: mode.value, apply: true, confirm: true,
+    });
+    view.grid = applied.grid;
+    sel = null;
+    draw();
+    toast(`${applied.applied} row(s) brought in — Ctrl+Z to undo`, 'ok');
+  } catch (error) { fail(error); }
+}
 
 /* -------------------------------------------------------------- columns --- */
 
@@ -814,16 +916,198 @@ function renderEditableCell(row, column, key) {
   return td;
 }
 
+/* ---------------------------------------------------------- suggestions --- */
+
+/** What this schedule already says in one column. */
+function suggestionsFor(key) {
+  return (view.grid.suggestions || {})[key] || { values: [], counts: {}, next: null };
+}
+
+/**
+ * The one value in this column that starts with what has been typed.
+ *
+ * One, deliberately. Two candidates means completing would be a guess, and a
+ * guess that lands in a schedule is worse than the four keystrokes it saved.
+ * Numbers are left alone: a duty of 4 is not the start of 450.
+ */
+function completionFor(key, typed) {
+  const text = String(typed || '');
+  if (text.length < 1 || /^[\d.,-]+$/.test(text)) return null;
+  const lower = text.toLowerCase();
+  const matches = suggestionsFor(key).values.filter(
+    (v) => v.toLowerCase().startsWith(lower) && v.length > text.length
+  );
+  // Values differing only in case are the same suggestion, not two.
+  const distinct = [...new Set(matches.map((v) => v.toLowerCase()))];
+  return distinct.length === 1 ? matches[0] : null;
+}
+
+/**
+ * The reference this row would get if nobody typed one.
+ *
+ * Shown as a placeholder on the last empty cell of a column that counts, and
+ * taken by pressing Tab or Enter — so adding a row to a schedule of MVHR-005
+ * is one keystroke rather than eight.
+ */
+function nextValueFor(row, key) {
+  const suggestion = suggestionsFor(key).next;
+  if (!suggestion) return null;
+  if ((row.values[key] ?? '') !== '') return null;
+
+  // On exactly one row: the first empty one after the last that has a value.
+  // Offering MVHR-006 on every empty row would be offering to make five
+  // duplicates, and offering it in a gap halfway up would make one.
+  const rows = view.grid.rows;
+  let lastFilled = -1;
+  rows.forEach((r, i) => {
+    if (String(r.values[key] ?? '').trim() !== '') lastFilled = i;
+  });
+  const target = rows[lastFilled + 1];
+  return target && target.id === row.id ? suggestion : null;
+}
+
+/**
+ * Complete what is being typed, inline, the way an address bar does.
+ *
+ * The completion goes in as selected text, so carrying on typing replaces it
+ * and Backspace removes it. Nothing is committed until the cell is left, which
+ * is what makes it safe to be wrong.
+ */
+function applyCompletion(box, key) {
+  const typed = box.value;
+  if (box.selectionStart !== typed.length) return;  // mid-word editing
+  const completion = completionFor(key, typed);
+  if (!completion) return;
+  box.value = completion;
+  box.setSelectionRange(typed.length, completion.length);
+}
+
 function cellInput(row, key, attrs = {}) {
-  return input(row.values[key] ?? '', {
+  const box = input(row.values[key] ?? '', {
     ...attrs,
     on: {
-      input: () => onType(row, key),
-      blur: () => flushRow(row),
+      input: (event) => {
+        // Only when adding to the end: deleting must not re-complete what was
+        // just deleted, which would make Backspace impossible.
+        const typing = !event.inputType || !event.inputType.startsWith('delete');
+        onType(row, key);
+        if (typing) applyCompletion(box, key);
+      },
+      blur: async () => {
+        await flushRow(row);
+        offerGroupFill(row, key);
+      },
       focus: () => focusFromCell(row.id, key),
       ...(attrs.on || {}),
     },
   });
+
+  const suggestion = nextValueFor(row, key);
+  if (suggestion) {
+    box.placeholder = suggestion;
+    box.dataset.suggest = suggestion;
+  }
+  return box;
+}
+
+/* ------------------------------------------------------- the group offer --- */
+
+/**
+ * Offers already turned down, so the same one is not made twice.
+ *
+ * Keyed by the column and the value. A suggestion that keeps coming back after
+ * being dismissed stops being help and becomes something to click past.
+ */
+const declinedOffers = new Set();
+
+/** Chips are one at a time; a second would be two things asking at once. */
+let groupChip = null;
+
+function dismissGroupChip() {
+  if (groupChip) { groupChip.remove(); groupChip = null; }
+}
+
+/**
+ * "The other twelve Cupboards have no airflow. Set them to 28 as well?"
+ *
+ * A hundred flats hold the same unit at the same duty, and typing it a hundred
+ * times is why somebody builds the schedule in Excel instead. The offer is
+ * deliberately narrow, because a wrong bulk edit costs far more than it saves:
+ *
+ * - only cells that are **empty**, never one somebody has already answered;
+ * - only where **two or more** rows share the grouping value, so a one-off is
+ *   not treated as a pattern;
+ * - only the grouping column that matches **most** rows, and never a column
+ *   whose values are unique, which self-excludes references;
+ * - once. Turn it down and it stays down for that column and value.
+ */
+function offerGroupFill(row, key) {
+  dismissGroupChip();
+  const column = view.grid.columns.find((c) => c.legacy_name === key);
+  if (!column || !column.editable) return;
+
+  const value = String(row.values[key] ?? '').trim();
+  if (!value) return;
+  if (declinedOffers.has(`${key}=${value}`)) return;
+
+  let best = null;
+  for (const other of view.grid.columns) {
+    if (!other.editable || other.legacy_name === key) continue;
+    const groupValue = String(row.values[other.legacy_name] ?? '').trim();
+    if (!groupValue) continue;
+
+    const targets = view.grid.rows.filter((r) =>
+      r.id !== row.id
+      && String(r.values[other.legacy_name] ?? '').trim().toLowerCase()
+         === groupValue.toLowerCase()
+      && String(r.values[key] ?? '').trim() === ''
+    );
+    if (targets.length >= 2 && (!best || targets.length > best.targets.length)) {
+      best = { column: other, groupValue, targets };
+    }
+  }
+  if (!best) return;
+
+  showGroupChip(row, key, value, best);
+}
+
+function showGroupChip(row, key, value, match) {
+  const entry = cellIndex.get(cellKey(row.id, key));
+  if (!entry) return;
+  const column = view.grid.columns.find((c) => c.legacy_name === key);
+
+  const apply = async () => {
+    dismissGroupChip();
+    const edits = match.targets.map((r) => ({ row_id: r.id, values: { [key]: value } }));
+    try {
+      view.grid = await api.schedules.editCells(view.id, edits, 'group_fill');
+      redrawPreservingFocus();
+      toast(`${edits.length} row(s) set to ${value} — Ctrl+Z to undo`, 'ok');
+    } catch (error) { fail(error); }
+  };
+
+  const chip = el('div', { class: 'fill-chip group-chip' }, [
+    el('span', { class: 'tiny' }, [
+      `${match.targets.length} other row(s) with ${match.column.name} `,
+      el('strong', { text: match.groupValue }),
+      ` have no ${column.name}.`,
+    ]),
+    button(`Set them to ${value}`, { class: 'btn btn-sm btn-primary', on: { click: apply } }),
+    el('button', {
+      class: 'icon-btn',
+      title: 'Not this time',
+      on: {
+        click: () => { declinedOffers.add(`${key}=${value}`); dismissGroupChip(); },
+      },
+    }, ['×']),
+  ]);
+
+  const box = entry.td.getBoundingClientRect();
+  chip.style.top = `${box.bottom + 4}px`;
+  chip.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - 420))}px`;
+  document.body.appendChild(chip);
+  groupChip = chip;
+  setTimeout(() => { if (groupChip === chip) dismissGroupChip(); }, 12000);
 }
 
 /* ------------------------------------------------------------ selection --- */
@@ -905,6 +1189,7 @@ function cellFromEvent(event) {
 function onMouseDown(event) {
   if (event.button !== 0) return;
   dismissFillChip();
+  dismissGroupChip();
   const cell = cellFromEvent(event);
   if (!cell) return;
 
@@ -1148,6 +1433,15 @@ function showFillChip(atRow, request) {
 function onGridKeyDown(event) {
   if (!sel) return;
   const box = event.target.tagName === 'INPUT' ? event.target : null;
+
+  // Tab or Enter on an empty cell takes the reference being offered. Only when
+  // it is empty: a suggestion must never overwrite something somebody typed.
+  if (box && (event.key === 'Tab' || event.key === 'Enter') && box.value === ''
+      && box.dataset.suggest) {
+    box.value = box.dataset.suggest;
+    delete box.dataset.suggest;
+    box.dispatchEvent(new Event('input', { bubbles: false }));
+  }
   const action = decide(event, {
     editing: Boolean(box),
     atStart: box ? box.selectionStart === 0 && box.selectionEnd === 0 : true,
@@ -1572,6 +1866,7 @@ function absorb(fresh) {
 
   view.grid.schedule = fresh.schedule;
   view.grid.history = fresh.history;
+  view.grid.suggestions = fresh.suggestions;
 
   if (!sameShape) {
     view.grid = fresh;
@@ -1619,10 +1914,33 @@ function absorb(fresh) {
     }
   });
 
+  refreshSuggestions();
   // Repaints the selection as well as the toolbar, because a patched cell has
   // lost the classes and the fill handle that were sitting on it.
   paintSelection();
   renderProblemSummary(document.querySelector('.page-wide > div:last-child'));
+}
+
+/**
+ * Move the offered reference to wherever it now belongs.
+ *
+ * A save patches the computed cells and deliberately leaves the inputs alone,
+ * so nothing rebuilds them — which means the ghost has to be moved by hand
+ * from the row that has just been filled in to the one below it.
+ */
+function refreshSuggestions() {
+  for (const [, entry] of cellIndex) {
+    const box = entry.td.querySelector('input');
+    if (!box || !entry.column.editable) continue;
+    const suggestion = nextValueFor(entry.row, entry.column.legacy_name);
+    if (suggestion) {
+      box.placeholder = suggestion;
+      box.dataset.suggest = suggestion;
+    } else if (box.dataset.suggest) {
+      box.placeholder = '';
+      delete box.dataset.suggest;
+    }
+  }
 }
 
 function saveState(state) {
@@ -1667,7 +1985,6 @@ async function addRow(focusColumn) {
     if (lastIndex >= 0) {
       const column = focusColumn !== undefined ? focusColumn : (typeableIndexes()[0] ?? 0);
       focusCell(lastIndex, column);
-      suggestReference(lastIndex, column);
     }
   } catch (error) { fail(error); }
 }

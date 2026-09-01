@@ -8,6 +8,7 @@ from schedul.core.references import (
     digit_runs,
     fill_series,
     is_incrementable,
+    next_in_column,
     next_reference,
     split_reference,
     varying_run,
@@ -136,3 +137,39 @@ class TestWhichNumberCounts:
 
     def test_counting_backwards_stops_rather_than_going_negative(self):
         assert fill_series("RAD-001", 3, step=-1) == ["RAD-000", "RAD-000", "RAD-000"]
+
+
+class TestTheNextReferenceDownAColumn:
+    """What to offer on a new row, read from the column rather than imposed.
+
+    A practice numbers its units its own way — MVHR-001 on the ground floor and
+    MVHR-101 on the first is one convention among many — so the suggestion is
+    only ever the pattern the column is already showing.
+    """
+
+    def test_it_counts_on_from_the_last_value(self):
+        assert next_in_column(["MVHR-001", "MVHR-002"]) == "MVHR-003"
+
+    def test_a_new_numbering_changes_what_is_offered(self):
+        assert next_in_column(["MVHR-001", "MVHR-002", "MVHR-101"]) == "MVHR-102"
+
+    def test_it_follows_which_number_the_column_is_counting(self):
+        assert next_in_column(
+            ["RM0.01 2 Bedroom", "RM0.02 2 Bedroom"]
+        ) == "RM0.03 2 Bedroom"
+
+    def test_an_empty_column_offers_nothing(self):
+        assert next_in_column([]) is None
+        assert next_in_column(["", None]) is None
+
+    def test_a_value_with_no_number_offers_nothing(self):
+        assert next_in_column(["Roof Plantroom"]) is None
+
+    def test_it_never_offers_a_duplicate(self):
+        # Counting on from RAD-001 in a column that already holds RAD-002 would
+        # be offering to make a duplicate reference, which is worse than
+        # offering nothing at all.
+        assert next_in_column(["RAD-002", "RAD-001"]) is None
+
+    def test_gaps_and_blanks_are_ignored(self):
+        assert next_in_column(["RAD-001", "", "RAD-002", None]) == "RAD-003"

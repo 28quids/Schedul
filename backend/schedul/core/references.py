@@ -17,7 +17,7 @@ from typing import Any, Sequence
 
 __all__ = [
     "split_reference", "next_reference", "fill_series", "is_incrementable",
-    "digit_runs", "varying_run",
+    "digit_runs", "varying_run", "next_in_column",
 ]
 
 #: A trailing run of digits, and everything before it.
@@ -102,6 +102,36 @@ def next_reference(value: str, step: int = 1, index: int = -1) -> str:
         return value
     # Keep the original width unless the number has outgrown it.
     return text[:start] + str(incremented).zfill(len(digits)) + text[end:]
+
+
+def next_in_column(values: Sequence[Any]) -> str | None:
+    """What the next value down a column of references would be.
+
+    The point of it is that nobody should type ``MVHR-001`` fifty times. What
+    "next" means is taken from the column itself rather than from a convention
+    this code has opinions about: ``MVHR-005`` suggests ``MVHR-006``, and the
+    moment somebody starts the first floor at ``MVHR-101`` it suggests
+    ``MVHR-102`` instead. A practice that numbers its units another way gets its
+    own way back, because the pattern is only ever read, never imposed.
+
+    Returns None when there is nothing to go on, when the last value holds no
+    number, or when the obvious next value is already in the column -- a
+    suggestion that would make a duplicate is worse than no suggestion.
+    """
+    filled = [str(v) for v in values if v not in (None, "")]
+    if not filled:
+        return None
+
+    last = filled[-1]
+    if not is_incrementable(last):
+        return None
+
+    # Two values say which number moves; one says only that the last run does.
+    index = varying_run(filled[-2:]) if len(filled) >= 2 else None
+    candidate = next_reference(last, 1, index if index is not None else -1)
+    if candidate == last or candidate.lower() in {v.lower() for v in filled}:
+        return None
+    return candidate
 
 
 def fill_series(

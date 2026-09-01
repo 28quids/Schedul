@@ -390,3 +390,150 @@ class TestTheLibraryWorkbook:
         )
         assert response.status_code == 400
         assert "Excel workbook" in response.text
+
+
+class TestTheScheduleWorkbook:
+    """A schedule's typed columns, out as a spreadsheet and back.
+
+    The deliverable export is a different file with a different job: a cover, a
+    revision page and every calculated column. This is the working one, and the
+    only columns in it are the ones somebody types.
+    """
+
+    @pytest.fixture()
+    def client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("SCHEDUL_DATABASE_URL", f"sqlite:///{tmp_path / 'sw.db'}")
+        import schedul.db.session as session_module
+
+        session_module.SessionLocal = None
+        session_module.init_db(f"sqlite:///{tmp_path / 'sw.db'}")
+        from schedul.api.main import app
+
+        return TestClient(app)
+
+    @pytest.fixture()
+    def schedule(self, client):
+        project = client.post("/api/projects", json={"number": "CM1"}).json()
+        building = project["buildings"][0]["id"]
+        made = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        return made["buildings"][0]["schedules"][0]["id"]
+
+    @staticmethod
+    def _book(content):
+        import io
+
+        from openpyxl import load_workbook
+
+        return load_workbook(io.BytesIO(content))
+
+    def _post(self, client, schedule, content, **data):
+        return client.post(
+            f"/api/schedules/{schedule}/rows/workbook",
+            files={"file": ("rows.xlsx", content, "application/octet-stream")},
+            data={"mode": "append", "apply": "false", **data},
+        )
+
+    def test_only_the_columns_somebody_types_are_in_it(self, client, schedule):
+        sheet = self._book(
+            client.get(f"/api/schedules/{schedule}/rows.xlsx").content
+        ).active
+        headings = [sheet.cell(1, c).value for c in range(1, 30) if sheet.cell(1, c).value]
+        assert "Unit Reference" in headings
+        assert "Model Reference" in headings
+        assert "Manufacturer" not in headings, "a product column is looked up, not typed"
+        assert "Total Airflow (l/s)" not in headings, "a calculated column is worked out"
+
+    def test_the_blank_one_has_the_same_headings_and_no_rows(self, client, schedule):
+        filled = self._book(client.get(f"/api/schedules/{schedule}/rows.xlsx").content).active
+        blank = self._book(
+            client.get(f"/api/schedules/{schedule}/rows.xlsx?filled=false").content
+        ).active
+        heads = lambda s: [s.cell(1, c).value for c in range(1, 30)]
+        assert heads(filled) == heads(blank)
+        assert blank.cell(2, 1).value is None
+
+    def test_what_is_on_the_schedule_comes_out_in_it(self, client, schedule):
+        client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Unit Reference": "MVHR-001", "Location": "Cupboard"},
+        })
+        sheet = self._book(
+            client.get(f"/api/schedules/{schedule}/rows.xlsx").content
+        ).active
+        assert sheet.cell(2, 1).value == "MVHR-001"
+        assert sheet.cell(2, 2).value == "Cupboard"
+
+    def test_a_filled_in_workbook_comes_back(self, client, schedule):
+        import io
+
+        book = self._book(
+            client.get(f"/api/schedules/{schedule}/rows.xlsx?filled=false").content
+        )
+        sheet = book.active
+        sheet.cell(2, 1, "MVHR-001")
+        sheet.cell(2, 2, "Cupboard")
+        sheet.cell(3, 1, "MVHR-002")
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        plan = self._post(client, schedule, buffer.getvalue()).json()
+        assert plan["detected_rows"] == 2
+        assert plan["header_detected"], "a workbook's first line is a heading by construction"
+
+        applied = self._post(client, schedule, buffer.getvalue(), apply="true").json()
+        assert applied["applied"] == 2
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert [r["values"].get("Unit Reference") for r in grid["rows"]] == [
+            "MVHR-001", "MVHR-002"
+        ]
+
+    def test_a_gap_in_the_middle_does_not_end_the_import(self, client, schedule):
+        import io
+
+        book = self._book(
+            client.get(f"/api/schedules/{schedule}/rows.xlsx?filled=false").content
+        )
+        sheet = book.active
+        sheet.cell(2, 1, "MVHR-001")
+        sheet.cell(4, 1, "MVHR-002")   # row 3 left blank
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        applied = self._post(client, schedule, buffer.getvalue(), apply="true").json()
+        assert applied["applied"] == 2, (
+            "a schedule genuinely has empty rows; stopping at the first would read "
+            "back only the part above it"
+        )
+
+    def test_replacing_is_still_refused_without_a_confirmation(self, client, schedule):
+        import io
+
+        client.post(f"/api/schedules/{schedule}/rows", json={
+            "values": {"Unit Reference": "ALREADY HERE"},
+        })
+        book = self._book(
+            client.get(f"/api/schedules/{schedule}/rows.xlsx?filled=false").content
+        )
+        book.active.cell(2, 1, "MVHR-001")
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        response = self._post(
+            client, schedule, buffer.getvalue(), mode="replace", apply="true"
+        )
+        assert response.status_code == 409
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert grid["rows"][0]["values"]["Unit Reference"] == "ALREADY HERE"
+
+    def test_something_that_is_not_a_workbook_is_refused_plainly(self, client, schedule):
+        response = client.post(
+            f"/api/schedules/{schedule}/rows/workbook",
+            files={"file": ("notes.txt", b"hello", "text/plain")},
+            data={"apply": "false"},
+        )
+        assert response.status_code == 400
+        assert "Excel workbook" in response.text
