@@ -22,8 +22,39 @@ python -m uvicorn schedul.api.main:app --reload --port 8000
 
 Then open <http://127.0.0.1:8000>.
 
-The first run creates `backend/data/schedul.db` and seeds an organisation with
-nine schedule types (the eight from the v1 `schema.json`, plus Radiant Panel).
+The first run creates the database and seeds an organisation with nine schedule
+types (the eight from the v1 `schema.json`, plus Radiant Panel).
+
+### Where your data lives, and keeping it across updates
+
+**The database is not inside this folder.** Everything — projects, the equipment
+library, branding, every schedule — is one SQLite file kept in a per-user data
+directory:
+
+| Platform | Path |
+|---|---|
+| Windows | `%LOCALAPPDATA%\Schedul\schedul.db` |
+| macOS | `~/Library/Application Support/Schedul/schedul.db` |
+| Linux | `~/.local/share/schedul/schedul.db` (or `$XDG_DATA_HOME/schedul`) |
+
+That is the answer to "why is everything gone when I download the new version".
+It used to be `backend/data/schedul.db`, inside the checkout, so updating by
+downloading a fresh zip into a new folder left the record behind in the old one.
+It was never deleted, but there was nowhere obvious to go and find it. A database
+in the old location is copied up to the new one automatically the first time this
+version starts, and the original is left where it is as a spare.
+
+So: **update however you like.** `git pull`, or download a new copy and delete
+the old folder — the database is not in it.
+
+Settings → Your data shows the exact path, and hands out a backup taken through
+SQLite's own backup API (safe to take while the server is running). Keep one
+before anything risky. To restore, stop the server and put the file back at that
+path as `schedul.db`.
+
+`SCHEDUL_DATA` overrides the directory. Pointing it at a synced folder —
+OneDrive, Dropbox — is also how two machines share one record, though one at a
+time: SQLite over a sync client does not take concurrent writers.
 
 ### PDF export
 
@@ -44,7 +75,7 @@ workbook is ordinary Excel and prints to PDF from Excel.
 | Variable | Meaning |
 |---|---|
 | `SCHEDUL_DATABASE_URL` | Defaults to SQLite under `backend/data/`. Point at PostgreSQL to move to a server. |
-| `SCHEDUL_DATA` | Where the SQLite file lives. |
+| `SCHEDUL_DATA` | Where the SQLite file lives. Defaults to the per-user directory above, never inside the checkout. |
 | `SCHEDUL_SOFFICE` | Path to LibreOffice, when it is not on `PATH`. |
 
 ---

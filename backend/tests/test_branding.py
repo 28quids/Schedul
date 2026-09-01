@@ -282,3 +282,83 @@ class TestIssueThemeVersusEditorTheme:
                 assert issued.cell(row, col).value == working.cell(row, col).value, (
                     "the theme changes how it looks, never what it says"
                 )
+
+
+class TestOneJobDifferingFromThePractice:
+    """A project answering "which fields does a document carry" for itself.
+
+    The house standard's own note used to say "hide what a job does not need",
+    which was not true of a setting that reached every job in the practice. This
+    is the setting that makes it true.
+    """
+
+    def test_a_project_follows_the_practice_until_it_says_otherwise(self, client):
+        project = client.post("/api/projects", json={"number": "CM1"}).json()
+        data = client.get(f"/api/projects/{project['id']}/branding").json()
+        assert data["overrides"] == {}
+        assert all(f["project"] is None for f in data["cover_fields"])
+        assert "building" in [f["key"] for f in data["preview"]["cover"]]
+
+    def test_hiding_a_field_on_one_job_leaves_every_other_job_alone(self, client, schedule):
+        first = client.get(f"/api/schedules/{schedule}").json()["project_id"]
+        second = client.post("/api/projects", json={"number": "CM2"}).json()
+
+        client.put(f"/api/projects/{first}/branding", json={
+            "cover_fields": {"building": False},
+            "revision_fields": {"building": False},
+        })
+
+        mine = client.get(f"/api/projects/{first}/branding").json()
+        theirs = client.get(f"/api/projects/{second['id']}/branding").json()
+        assert "building" not in [f["key"] for f in mine["preview"]["cover"]]
+        assert "building" in [f["key"] for f in theirs["preview"]["cover"]]
+        assert client.get("/api/settings/branding").json()["branding"]["cover_fields"] == {}
+
+    def test_it_reaches_the_workbook(self, client, schedule):
+        project = client.get(f"/api/schedules/{schedule}").json()["project_id"]
+        assert "Building" in labels(workbook(client, schedule)["Revision page"])
+
+        client.put(f"/api/projects/{project}/branding", json={
+            "cover_fields": {"building": False},
+            "revision_fields": {"building": False},
+        })
+        after = workbook(client, schedule)
+        assert "Building" not in labels(after["Revision page"])
+        assert "Building" not in labels(after["Front Cover"])
+
+    def test_a_project_can_show_what_the_practice_hides(self, client, schedule):
+        project = client.get(f"/api/schedules/{schedule}").json()["project_id"]
+        client.put("/api/settings", json={"branding": {"cover_fields": {"building": False}}})
+        assert "Building" not in labels(workbook(client, schedule)["Front Cover"])
+
+        client.put(f"/api/projects/{project}/branding", json={
+            "cover_fields": {"building": True},
+        })
+        assert "Building" in labels(workbook(client, schedule)["Front Cover"])
+
+    def test_a_project_cannot_hide_a_row_the_workbook_reads(self, client):
+        project = client.post("/api/projects", json={"number": "CM1"}).json()
+        response = client.put(f"/api/projects/{project['id']}/branding", json={
+            "revision_fields": {"document_number": False},
+        })
+        assert response.status_code == 400
+        assert "cannot be hidden" in response.text
+
+    def test_a_project_cannot_change_the_practice_typeface(self, client, schedule):
+        project = client.get(f"/api/schedules/{schedule}").json()["project_id"]
+        client.put(f"/api/projects/{project}/branding", json={
+            "cover_fields": {}, "cover_subtitle": "Mechanical Services",
+        })
+        stored = client.get(f"/api/projects/{project}/branding").json()["overrides"]
+        assert "cover_font" not in stored, (
+            "a per-project typeface would quietly end the house standard"
+        )
+
+    def test_following_the_practice_again_drops_the_overrides(self, client, schedule):
+        project = client.get(f"/api/schedules/{schedule}").json()["project_id"]
+        client.put(f"/api/projects/{project}/branding", json={
+            "cover_fields": {"building": False},
+        })
+        client.put(f"/api/projects/{project}/branding", json={"cover_fields": {}})
+        assert client.get(f"/api/projects/{project}/branding").json()["overrides"] == {}
+        assert "Building" in labels(workbook(client, schedule)["Front Cover"])

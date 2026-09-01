@@ -90,6 +90,8 @@ export const api = {
     audit: (id, bid) => request('GET', `/api/projects/${id}/buildings/${bid}/audit`),
 
     bulkRevision: (id, body) => request('POST', `/api/projects/${id}/revisions/bulk`, body),
+    branding: (id) => request('GET', `/api/projects/${id}/branding`),
+    setBranding: (id, body) => request('PUT', `/api/projects/${id}/branding`, body),
     columns: (id, code) => request('GET', `/api/projects/${id}/columns/${code}`),
     setColumns: (id, body) => request('PUT', `/api/projects/${id}/columns`, body),
   },
@@ -199,6 +201,7 @@ export const api = {
   settings: {
     read: () => request('GET', '/api/settings'),
     update: (body) => request('PUT', '/api/settings', body),
+    storage: () => request('GET', '/api/settings/storage'),
     branding: () => request('GET', '/api/settings/branding'),
     previewBranding: (branding) =>
       request('POST', '/api/settings/branding/preview', { branding }),

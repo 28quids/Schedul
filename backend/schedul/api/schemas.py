@@ -19,6 +19,7 @@ __all__ = [
     "TypeIn", "TypeOut", "TypeSummary", "ColumnIn",
     "RenumberIn", "PlanOut", "PlanChange",
     "RegisterRow", "AuditOut", "HouseStandardIn",
+    "ProjectBrandingIn", "ColumnVisibilityIn",
 ]
 
 
@@ -87,6 +88,20 @@ class ProjectIn(BaseModel):
     #: Notes this job adds under the organisation's. None leaves them as they
     #: are, so a form that does not carry them cannot blank them by omission.
     notes: list[str] | None = None
+
+
+class ProjectBrandingIn(BaseModel):
+    """What one job answers differently about its documents.
+
+    Only the parts ``core.branding.PROJECT_KEYS`` allows. Fonts, colours and the
+    logo are house standard and are not on offer here.
+    """
+
+    cover_fields: dict[str, bool] = Field(default_factory=dict)
+    cover_order: list[str] = Field(default_factory=list)
+    revision_fields: dict[str, bool] = Field(default_factory=dict)
+    revision_order: list[str] = Field(default_factory=list)
+    cover_subtitle: str | None = None
 
 
 class ScheduleOut(BaseModel):

@@ -6,6 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...core.branding import (
+    COVER_FIELDS, PROJECT_KEYS, REVISION_FIELDS, Branding, validate_branding,
+    with_project_overrides,
+)
 from ...core.numbering import RenumberPlan
 from ...db.models import Building, Organisation, Project, Schedule, ScheduleTypeRow
 from ...services import projects as svc
@@ -28,6 +32,7 @@ from ..schemas import (
     CloneIn,
     PlanChange,
     PlanOut,
+    ProjectBrandingIn,
     ProjectIn,
     ProjectOut,
     ProjectSummary,
@@ -134,6 +139,104 @@ def update_project(
         setattr(project, key, value)
     session.flush()
     return project_view(session, project, org)
+
+
+# ------------------------------------------------- this job's documents ---
+
+
+def _branding_payload(session: Session, project: Project, org: Organisation) -> dict[str, object]:
+    """The house standard, this project's answers, and what they add up to.
+
+    All three, because the useful question on a project screen is not "what does
+    this project say" but "what will come out, and which of it is mine". A
+    screen that showed only the overrides would leave somebody wondering why a
+    row they never touched is missing.
+    """
+    house = svc.house_standard_for(session, org.id)
+    overrides = dict(project.branding_overrides or {})
+    effective = Branding.from_dict(with_project_overrides(house.branding, overrides))
+    organisation = Branding.from_dict(house.branding)
+
+    def described(fields, shown_house, shown_project):
+        return [
+            {
+                "key": f.key,
+                "label": f.label,
+                "optional": f.optional,
+                "hint": f.hint,
+                "house": bool(shown_house.get(f.key, True)),
+                "project": (
+                    None if f.key not in shown_project else bool(shown_project[f.key])
+                ),
+            }
+            for f in fields
+        ]
+
+    return {
+        "overrides": overrides,
+        "cover_fields": described(
+            COVER_FIELDS, organisation.cover_fields, overrides.get("cover_fields") or {}
+        ),
+        "revision_fields": described(
+            REVISION_FIELDS, organisation.revision_fields,
+            overrides.get("revision_fields") or {},
+        ),
+        "cover_subtitle": {
+            "house": organisation.cover_subtitle,
+            "project": overrides.get("cover_subtitle"),
+        },
+        "preview": {
+            "cover": [{"key": f.key, "label": f.label} for f in effective.cover_layout()],
+            "revision": [
+                {"key": f.key, "label": f.label} for f in effective.revision_layout()
+            ],
+        },
+    }
+
+
+@router.get("/{project_id}/branding")
+def read_project_branding(
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Which fields this job's covers and revision pages carry."""
+    return _branding_payload(session, project, org)
+
+
+@router.put("/{project_id}/branding")
+def write_project_branding(
+    payload: ProjectBrandingIn,
+    project: Project = Depends(get_project),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Let one job differ from the house standard about which fields show.
+
+    Only the parts ``core.branding`` allows a project to answer -- fonts,
+    colours and the logo stay house standard, because the point of a house
+    standard is that every document that leaves the office looks like it came
+    from the same place.
+
+    The result is validated as a whole branding payload rather than field by
+    field, so a project cannot hide a row the workbook reads by formula any more
+    than the organisation can.
+    """
+    wanted = {
+        key: value
+        for key, value in payload.model_dump(exclude_none=True).items()
+        if key in PROJECT_KEYS
+    }
+    house = svc.house_standard_for(session, org.id)
+    problems = validate_branding(with_project_overrides(house.branding, wanted))
+    if problems:
+        raise HTTPException(status_code=400, detail=problems)
+
+    # Only the exceptions are stored: an empty payload means "follow the house
+    # standard", which is what a project should read as until it says otherwise.
+    project.branding_overrides = {k: v for k, v in wanted.items() if v not in ({}, [], "")}
+    session.flush()
+    return _branding_payload(session, project, org)
 
 
 @router.delete("/{project_id}", status_code=204)

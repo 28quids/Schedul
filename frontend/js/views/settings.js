@@ -5,7 +5,8 @@
 
 import { api } from '../api.js';
 import {
-  button, card, clear, el, fail, field, input, mount, notice, pill, select, table, toast,
+  button, card, clear, download, el, fail, field, input, mount, notice, pill,
+  select, table, toast,
 } from '../ui.js';
 import { brandingSection } from './branding.js';
 
@@ -29,6 +30,7 @@ export async function settingsView() {
       ['numbering', 'Numbering'],
       ['content', 'Notes and constants'],
       ['branding', 'Branding'],
+      ['data', 'Your data'],
     ].map(([key, label]) =>
       el('button', {
         class: `tab${state.tab === key ? ' active' : ''}`,
@@ -44,6 +46,14 @@ export async function settingsView() {
     page.appendChild(host);
     mount(page);
     await brandingSection(host);
+    return;
+  }
+
+  if (state.tab === 'data') {
+    const host = el('div');
+    page.appendChild(host);
+    mount(page);
+    await dataSection(host);
     return;
   }
 
@@ -318,4 +328,71 @@ export async function settingsView() {
   ));
 
   mount(page);
+}
+
+
+/* ------------------------------------------------------------ your data --- */
+
+/**
+ * Where the record is kept, and how to keep a copy of it.
+ *
+ * This exists because "I downloaded the update and everything was gone" is the
+ * worst thing this tool can do to somebody, and until the database moved out of
+ * the source folder it did exactly that to anyone who updated by downloading a
+ * fresh copy into a new folder. Nothing had been lost — it was still sitting in
+ * the old folder — but there was nowhere to go and look, which is the same
+ * thing from where the user is standing.
+ */
+async function dataSection(host) {
+  let storage;
+  try {
+    storage = await api.settings.storage();
+  } catch (error) { host.appendChild(notice(error.message, 'error')); return; }
+
+  const size = storage.size_bytes
+    ? `${(storage.size_bytes / 1024 / 1024).toFixed(1)} MB`
+    : '—';
+
+  host.appendChild(card(
+    'Where your data lives',
+    el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'Your projects, equipment library, branding and every schedule are in one file, ',
+        'and it is deliberately not inside the folder you downloaded. Updating the tool — ',
+        'by pulling, or by unpacking a new copy somewhere else — leaves it exactly where ',
+        'it is.',
+      ]),
+      el('dl', { class: 'kv' }, [
+        el('dt', { text: 'Database' }),
+        el('dd', { class: 'mono', text: storage.external ? storage.database_url : storage.database }),
+        el('dt', { text: 'Size' }),
+        el('dd', { text: size }),
+        ...(storage.legacy_copy ? [
+          el('dt', { text: 'Older copy' }),
+          el('dd', { class: 'mono', text: storage.legacy_copy }),
+        ] : []),
+      ]),
+      storage.legacy_copy
+        ? notice(
+            'A database from an earlier version is still in the folder you downloaded. It ' +
+            'was copied to the location above the first time this version started, so the ' +
+            'old one is a spare rather than the live record — check the projects here look ' +
+            'right before you delete the folder it is in.',
+            'info'
+          )
+        : null,
+      el('p', { class: 'muted tiny' }, [
+        `Set ${storage.override_env} to keep it somewhere else — a synced drive, for `,
+        'instance, which is also how two machines can share one record.',
+      ]),
+    ]),
+    [
+      button('Download a backup', {
+        class: 'btn btn-primary',
+        title: 'A consistent copy of the whole database, taken safely while it is in use',
+        on: { click: () => download('/api/settings/backup.db') },
+      }),
+    ],
+    'To restore one, stop the server and put the file back at the path above as schedul.db.'
+  ));
 }

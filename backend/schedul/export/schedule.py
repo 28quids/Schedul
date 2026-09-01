@@ -45,7 +45,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from ..core.branding import Branding
+from ..core.branding import Branding, with_project_overrides
 from ..core.catalogue import MODEL_REFERENCE, ScheduleType
 from ..core.formula import CONSTANTS, FormulaError, field_names, to_excel
 from ..core.house import HouseStandard
@@ -171,12 +171,16 @@ class ScheduleContent:
         classification: str = "",
         theme: str = "xlsx",
         notes: Sequence[str] | None = None,
+        branding_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.schedule_type = schedule_type
         self.house = house
         self.project_fields = project_fields
         self.design_constants = design_constants
         self.docnum = docnum
+        #: What this one job answers differently about which fields appear.
+        #: Fonts, colours and the logo stay house standard -- see core.branding.
+        self.branding_overrides = dict(branding_overrides or {})
         self.building_ref = building_ref
         self.building_name = building_name
         self.rows = list(rows)
@@ -218,8 +222,15 @@ class ScheduleContent:
 
     @property
     def branding(self) -> Branding:
-        """The practice's document appearance, as the renderer's instructions."""
-        return Branding.from_dict(self.house.branding)
+        """The practice's document appearance, as the renderer's instructions.
+
+        The house standard with this project's own answers folded in, so a job
+        with no buildings and no BSUID can drop those rows without every other
+        job in the practice losing them.
+        """
+        return Branding.from_dict(
+            with_project_overrides(self.house.branding, self.branding_overrides)
+        )
 
     @property
     def house_style(self) -> dict[str, Any]:

@@ -30,11 +30,29 @@ __all__ = [
     "SAFE_FONTS",
     "COVER_FIELDS",
     "REVISION_FIELDS",
+    "PROJECT_KEYS",
     "Branding",
     "Field",
     "resolve_fields",
     "validate_branding",
+    "with_project_overrides",
 ]
+
+#: The parts of branding a single job may answer differently.
+#:
+#: Which fields a document carries is a decision about a document, and two jobs
+#: legitimately differ: one has buildings and a client who wants a BSUID, the
+#: next has neither. Fonts, colours and the logo are not on this list and are
+#: not meant to be -- the whole point of a house standard is that every document
+#: that leaves the office looks like it came from the same place, and a
+#: per-project typeface would quietly end that.
+PROJECT_KEYS: tuple[str, ...] = (
+    "cover_fields",
+    "cover_order",
+    "revision_fields",
+    "revision_order",
+    "cover_subtitle",
+)
 
 #: Fonts a document may be set in.
 #:
@@ -211,6 +229,28 @@ class Branding:
             "title_grey": self.colour("title"),
             "title_blue": self.colour("accent"),
         }
+
+
+def with_project_overrides(
+    house: dict[str, Any] | None, project: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The organisation's branding as one project sees it.
+
+    Only :data:`PROJECT_KEYS` are taken from the project, and the show/hide maps
+    are merged key by key rather than replaced: a project that hides Building
+    should not silently un-hide everything the practice had hidden, which is
+    what a wholesale replacement would do.
+    """
+    merged = dict(house or {})
+    for key in PROJECT_KEYS:
+        if not project or key not in project:
+            continue
+        value = project[key]
+        if key.endswith("_fields"):
+            merged[key] = {**(merged.get(key) or {}), **(value or {})}
+        elif value not in (None, "", []):
+            merged[key] = value
+    return merged
 
 
 def resolve_fields(

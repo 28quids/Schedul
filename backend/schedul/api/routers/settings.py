@@ -6,7 +6,12 @@ makes a second organisation a profile rather than a fork.
 
 from __future__ import annotations
 
+import datetime as _dt
+import tempfile
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -36,6 +41,87 @@ def read_settings(
         "naming_problems": scheme.validate(),
         "pattern_tokens": scheme.pattern_tokens,
     }
+
+
+# ----------------------------------------------------------- where it lives ---
+
+
+def _sqlite_path(url: str) -> Path | None:
+    """The file a SQLite URL points at, or None for a database server.
+
+    Read from the URL the engine actually uses rather than from the default
+    directory, so a ``SCHEDUL_DATABASE_URL`` pointing somewhere else is reported
+    honestly instead of being papered over with where it would have been.
+    """
+    if not url.startswith("sqlite"):
+        return None
+    _, _, tail = url.partition(":///")
+    return Path(tail) if tail else None
+
+
+@router.get("/storage")
+def read_storage() -> dict[str, object]:
+    """Where the record is kept, and whether it survived the last update.
+
+    Worth a screen of its own because the answer used to be "inside the folder
+    you downloaded", and updating by downloading a fresh copy therefore looked
+    exactly like losing everything. Somebody who has been bitten by that once
+    needs to be able to see the path.
+    """
+    from ...db import session as db_session
+
+    url = db_session.database_url()
+    path = _sqlite_path(url)
+    external = path is None
+    legacy = db_session.legacy_data_dir() / "schedul.db"
+
+    return {
+        "external": external,
+        "database_url": url if external else "",
+        "directory": str(path.parent) if path else "",
+        "database": str(path) if path else "",
+        "exists": bool(path and path.exists()),
+        "size_bytes": path.stat().st_size if (path and path.exists()) else 0,
+        # Reported rather than assumed: if a copy is still sitting in the old
+        # in-checkout location, say so, because it is the thing somebody will
+        # want to check against before deleting the folder it is in.
+        "legacy_copy": str(legacy) if legacy.exists() else "",
+        "override_env": "SCHEDUL_DATA",
+    }
+
+
+@router.get("/backup.db")
+def download_backup() -> FileResponse:
+    """A consistent copy of the database, to keep somewhere else.
+
+    Taken through SQLite's own backup API rather than by copying the file: a
+    plain copy of a database being written to is a copy that may not open, and a
+    backup nobody can restore is worse than no backup because of what it is
+    believed to be.
+    """
+    import sqlite3
+
+    from ...db import session as db_session
+
+    source = _sqlite_path(db_session.database_url())
+    if source is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "this instance is on a database server rather than a file, so a "
+                "backup is the server's own job"
+            ),
+        )
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="there is no database yet")
+
+    stamp = _dt.datetime.now().strftime("%Y-%m-%d")
+    target = Path(tempfile.mkdtemp(prefix="schedul-backup-")) / f"schedul-{stamp}.db"
+    with sqlite3.connect(source) as live, sqlite3.connect(target) as copy:
+        live.backup(copy)
+    return FileResponse(
+        target, filename=target.name, media_type="application/octet-stream"
+    )
 
 
 @router.get("/branding")

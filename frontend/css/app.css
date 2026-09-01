@@ -680,3 +680,13 @@ table.headings th {
 }
 table.headings th.key { background: var(--blue-wash); color: var(--blue-dark); }
 table.headings td { white-space: nowrap; }
+
+/* ------------------------------------------ this project's document fields --- */
+
+.field-chooser { margin-top: 8px; }
+.chooser-row {
+  display: grid; grid-template-columns: 1fr 180px; gap: 10px; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--grey-200);
+}
+.chooser-row:last-child { border-bottom: none; }
+.chooser-row select { font-size: 12px; }
