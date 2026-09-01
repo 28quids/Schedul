@@ -110,6 +110,9 @@ export const api = {
     pastePreview: (id, body) =>
       request('POST', `/api/schedules/${id}/rows/paste/preview`, body),
     fill: (id, body) => request('POST', `/api/schedules/${id}/rows/fill`, body),
+    columns: (id) => request('GET', `/api/schedules/${id}/columns`),
+    setColumns: (id, columns) =>
+      request('PUT', `/api/schedules/${id}/columns`, { columns }),
     notes: (id) => request('GET', `/api/schedules/${id}/notes`),
     setNotes: (id, notes) => request('PUT', `/api/schedules/${id}/notes`, { notes }),
     customiseNotes: (id) => request('POST', `/api/schedules/${id}/notes/customise`),

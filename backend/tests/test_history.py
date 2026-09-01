@@ -281,3 +281,114 @@ class TestRangeFill:
         assert response.status_code == 400
         grid = client.get(f"/api/schedules/{schedule}").json()
         assert refs(grid) == ["A", None], "a refused fill changes nothing at all"
+
+
+class TestDraggingTheFillHandle:
+    """What the corner handle asks the server to do.
+
+    The increment rule stays in ``core.references`` -- the browser sends a
+    direction and a count, not a list of values -- so a drag, a toolbar button
+    and an importer all produce the same references.
+    """
+
+    def test_dragging_down_counts_up(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        for _ in range(2):
+            add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 2,
+            "mode": "series", "direction": "down",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-002", "RAD-003"]
+
+    def test_dragging_up_counts_down(self, client, schedule):
+        for _ in range(2):
+            add(client, schedule)
+        add(client, schedule, **{"Unit Reference": "RAD-005"})
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 2, "count": 2,
+            "mode": "series", "direction": "up",
+        }).json()
+        assert refs(grid) == ["RAD-003", "RAD-004", "RAD-005"], (
+            "dragging a reference upwards counts down, as a spreadsheet does"
+        )
+
+    def test_holding_ctrl_copies_instead(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        add(client, schedule)
+        grid = client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 1,
+            "mode": "copy", "direction": "down",
+        }).json()
+        assert refs(grid) == ["RAD-001", "RAD-001"]
+
+    def test_a_drag_is_one_undo(self, client, schedule):
+        add(client, schedule, **{"Unit Reference": "RAD-001"})
+        for _ in range(3):
+            add(client, schedule)
+        client.post(f"/api/schedules/{schedule}/rows/fill", json={
+            "columns": ["Unit Reference"], "start_position": 0, "count": 3,
+            "mode": "series",
+        })
+        grid = client.post(f"/api/schedules/{schedule}/undo").json()
+        assert refs(grid) == ["RAD-001", None, None, None]
+
+
+class TestOverridingASelection:
+    """Taking several library cells over in one step.
+
+    A row that diverges from the library usually diverges in company, and one
+    pencil at a time is the difference between a feature people use and one they
+    work around.
+    """
+
+    def _with_products(self, client, schedule):
+        client.post("/api/library", json={
+            "type_code": "MVHR",
+            "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Width (mm)": 900},
+        })
+        first = add(client, schedule, **{
+            "Unit Reference": "MVHR-01", "Model Reference": "SYS-VSR-500",
+        })
+        add(client, schedule, **{
+            "Unit Reference": "MVHR-02", "Model Reference": "SYS-VSR-500",
+        })
+        return client.get(f"/api/schedules/{schedule}").json()
+
+    def test_a_block_of_library_cells_is_taken_over_at_once(self, client, schedule):
+        grid = self._with_products(client, schedule)
+        edits = [
+            {
+                "row_id": row["id"],
+                "values": {},
+                "overrides": {"Width (mm)": row["computed"]["Width (mm)"]},
+            }
+            for row in grid["rows"]
+        ]
+        after = client.post(f"/api/schedules/{schedule}/rows/cells", json={
+            "edits": edits, "action": "override_cells",
+        }).json()
+        assert all("Width (mm)" in r["overrides"] for r in after["rows"])
+        assert after["history"]["can_undo"], "a bulk override is one undoable step"
+
+    def test_restoring_the_block_puts_every_cell_back_on_the_library(
+        self, client, schedule
+    ):
+        grid = self._with_products(client, schedule)
+        client.post(f"/api/schedules/{schedule}/rows/cells", json={
+            "edits": [
+                {"row_id": r["id"], "values": {}, "overrides": {"Width (mm)": 1234}}
+                for r in grid["rows"]
+            ],
+            "action": "override_cells",
+        })
+        after = client.post(f"/api/schedules/{schedule}/rows/cells", json={
+            "edits": [
+                {"row_id": r["id"], "values": {}, "overrides": {"Width (mm)": ""}}
+                for r in grid["rows"]
+            ],
+            "action": "restore_cells",
+        }).json()
+        assert all(not r["overrides"] for r in after["rows"])
+        assert all(r["computed"]["Width (mm)"] == 900 for r in after["rows"])

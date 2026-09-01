@@ -53,12 +53,17 @@ def next_reference(value: str, step: int = 1) -> str:
     return f"{prefix}{str(incremented).zfill(len(digits))}"
 
 
-def fill_series(seed: Any, count: int, *, mode: str = "series") -> list[Any]:
+def fill_series(seed: Any, count: int, *, mode: str = "series", step: int = 1) -> list[Any]:
     """The values a fill-down should produce, starting from ``seed``.
 
     ``mode='series'`` counts up where the seed ends in digits and repeats it
     otherwise, which is what a user means by dragging a reference down.
     ``mode='copy'`` always repeats.
+
+    ``step`` is what a fill handle dragged upwards needs: from ``RAD-005`` a
+    spreadsheet gives ``RAD-004, RAD-003``, not the same value five times. A
+    step that would take the number below zero stops counting and repeats the
+    last value it could reach, because ``RAD--001`` is not a reference.
     """
     if count <= 0:
         return []
@@ -71,6 +76,6 @@ def fill_series(seed: Any, count: int, *, mode: str = "series") -> list[Any]:
     out: list[Any] = []
     current = str(seed)
     for _ in range(count):
-        current = next_reference(current)
+        current = next_reference(current, step)
         out.append(current)
     return out

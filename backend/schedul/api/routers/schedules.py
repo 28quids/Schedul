@@ -18,7 +18,9 @@ from ...services.converters import (
     revisions_of,
     type_from_row,
 )
-from ...services.columns import columns_for
+from ...services.columns import (
+    TARGETS, columns_for, validate_visibility, visibility_view,
+)
 from ...services.issue import diff_snapshots, issue_revision
 from ...services import history as hist
 from ...services import notes as notes_svc
@@ -27,8 +29,8 @@ from ..deps import current_org, get_db, get_schedule, schedule_view
 from ...core.references import fill_series
 from ...core import tabular
 from ..schemas import (
-    CellsIn, DeleteRowsIn, FillIn, GridColumn, GridOut, PasteIn, PastePreviewIn,
-    RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
+    CellsIn, ColumnVisibilityIn, DeleteRowsIn, FillIn, GridColumn, GridOut, PasteIn,
+    PastePreviewIn, RevisionIn, RevisionOut, RowIn, RowOut, ScheduleNotesIn,
 )
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -483,23 +485,31 @@ def fill_down(
     if start is None:
         raise HTTPException(status_code=404, detail="no row at that position")
 
-    below = ordered[start + 1 :]
+    if payload.direction == "up":
+        # Nearest first, so the series counts away from the seed the way a
+        # spreadsheet's handle dragged upwards does.
+        target = list(reversed(ordered[:start]))
+        step = -1
+    else:
+        target = ordered[start + 1 :]
+        step = 1
     if payload.count is not None:
-        below = below[: max(0, payload.count)]
-    if not below:
+        target = target[: max(0, payload.count)]
+    if not target:
         return _grid(session, schedule, org)
 
     before = hist.snapshot_rows(schedule)
     for key in keys:
         seed = (ordered[start].values or {}).get(key, "")
-        for row, value in zip(below, fill_series(seed, len(below), mode=payload.mode)):
+        filled = fill_series(seed, len(target), mode=payload.mode, step=step)
+        for row, value in zip(target, filled):
             row.values = {**(row.values or {}), key: value}
 
     session.flush()
     session.expire(schedule, ["rows"])
     hist.record_edit(
         session, schedule, "fill", before,
-        summary=f"filled {len(below)} row(s)",
+        summary=f"filled {len(target)} row(s)",
     )
     return _grid(session, schedule, org)
 
@@ -533,6 +543,52 @@ def redo_edit(
     except hist.UndoError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _grid(session, schedule, org)
+
+
+# ----------------------------------------------------------------- notes ---
+
+
+# --------------------------------------------------------------- columns ---
+
+
+def _columns_payload(schedule: Schedule) -> dict[str, object]:
+    return {
+        "targets": list(TARGETS),
+        "columns": visibility_view(schedule),
+    }
+
+
+@router.get("/{schedule_id}/columns")
+def read_columns(schedule: Schedule = Depends(get_schedule)) -> dict[str, object]:
+    """Every column on this schedule, and where each one currently shows.
+
+    Which columns can be hidden is part of the answer rather than something the
+    browser works out: the lookup key and anything a calculation reads are
+    reported as fixed, so no screen can offer a switch that would produce a
+    workbook with a broken reference in it.
+    """
+    return _columns_payload(schedule)
+
+
+@router.put("/{schedule_id}/columns")
+def write_columns(
+    payload: ColumnVisibilityIn,
+    schedule: Schedule = Depends(get_schedule),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Hide or show columns on this one schedule.
+
+    Refused rather than half-applied: if any column in the request cannot be
+    hidden, nothing is stored and the reasons come back. A partially applied
+    change would leave somebody believing the cost column is off the client's
+    copy when it is not.
+    """
+    cleaned, problems = validate_visibility(schedule, payload.columns)
+    if problems:
+        raise HTTPException(status_code=400, detail=problems)
+    schedule.column_visibility = cleaned
+    session.flush()
+    return _columns_payload(schedule)
 
 
 # ----------------------------------------------------------------- notes ---

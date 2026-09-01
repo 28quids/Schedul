@@ -282,6 +282,7 @@ table.sheet td.cell-input input {
 table.sheet td.cell-input input:focus {
   box-shadow: inset 0 0 0 2px var(--blue); position: relative; z-index: 1;
 }
+table.sheet tbody td { position: relative; }
 table.sheet td.cell-library, table.sheet td.cell-derived { padding: 4px 7px; }
 table.sheet td.cell-library { color: var(--library-text); }
 table.sheet td.cell-derived { color: var(--derived-text); font-variant-numeric: tabular-nums; }
@@ -413,8 +414,42 @@ td.cell-input .with-flag { display: flex; align-items: center; }
 td.cell-input .with-flag input { flex: 1; min-width: 0; }
 
 td.cell-selected input { box-shadow: inset 0 0 0 2px var(--blue); }
-.sheet-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+/* One toolbar shape, used on every screen that has one: groups of related
+   buttons separated by a rule, and anything that is not an action pushed to the
+   right. Consistency here is what stops "where is delete" being a different
+   answer on each page. */
+.sheet-toolbar {
+  display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-bottom: 12px;
+}
+.tool-group { display: flex; gap: 6px; align-items: center; padding-right: 10px; }
+.tool-group + .tool-group { border-left: 1px solid var(--grey-300); padding-left: 10px; }
+.toolbar-end {
+  margin-left: auto; display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+}
 .toolbar-gap { width: 10px; }
+
+/* -------------------------------------------------------- the fill handle --- */
+
+/* The small square at the corner of the selection. A spreadsheet's most-used
+   gesture, and the reason nobody had to know where the Fill series button was. */
+.fill-handle {
+  position: absolute; right: -3px; bottom: -3px; width: 7px; height: 7px;
+  background: var(--blue); border: 1px solid var(--white); border-radius: 1px;
+  cursor: crosshair; z-index: 2;
+}
+table.sheet td.fill-preview {
+  box-shadow: inset 0 0 0 1px var(--blue);
+  background-image: linear-gradient(var(--sel-wash), var(--sel-wash));
+}
+.fill-chip {
+  position: fixed; z-index: 60; display: flex; gap: 8px; align-items: center;
+  background: var(--white); border: 1px solid var(--grey-300);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 5px 8px;
+  color: var(--grey-600);
+}
+
+/* The columns dialog: a tick per target, centred under its heading. */
+td.tick, th.tick { text-align: center; }
 
 /* ------------------------------------------------------------ selection --- */
 

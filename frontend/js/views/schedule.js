@@ -44,6 +44,16 @@ const cellKey = (rowId, column) => `${rowId} ${column}`;
 let sel = null;
 /** True while a drag-select is in progress. */
 let dragging = false;
+/**
+ * The fill handle's drag, while one is in progress.
+ *
+ * `{ box, to }` — the selection the drag started from and the row it currently
+ * reaches. Kept separate from `sel` so the selection itself does not move while
+ * somebody is deciding how far to drag.
+ */
+let fillDrag = null;
+/** The last fill, so the options chip can redo it the other way. */
+let lastFill = null;
 /** Which column a run of tabbing began in, so Enter comes back to it. */
 let tabAnchor = null;
 
@@ -235,8 +245,9 @@ function drawGrid(root) {
   root.appendChild(sheet);
   root.appendChild(el('div', { class: 'sheet-hint', style: 'margin-top:8px' }, [
     'Arrows move, Enter goes down, Tab goes right. Shift+arrows or a drag select a ' +
-    'block; Ctrl+C and Ctrl+V copy and paste one. Delete clears the selection, ' +
-    'Ctrl+D fills it down, Ctrl+Z undoes.',
+    'block; Ctrl+C and Ctrl+V copy and paste one. Drag the small square at the corner ' +
+    'of the selection to fill — a reference ending in digits counts up, and holding ' +
+    'Ctrl copies instead. Delete clears the selection, Ctrl+D fills it down, Ctrl+Z undoes.',
   ]));
 
   renderTypeDrift(root);
@@ -268,50 +279,280 @@ function renderTypeDrift(root) {
   ]));
 }
 
+/** The library cells the selection covers, grouped by row. */
+function selectedLibraryCells() {
+  if (!sel) return [];
+  const out = [];
+  for (const r of selectedRows(sel)) {
+    const row = rowAt(r);
+    if (!row) continue;
+    const keys = [];
+    for (const c of selectedColumns(sel)) {
+      const column = columnAt(c);
+      if (column && column.kind === 'library') keys.push(column.legacy_name);
+    }
+    if (keys.length) out.push({ row, keys });
+  }
+  return out;
+}
+
+// One group of related buttons. Every toolbar in the app is built from these,
+// so "where is the delete button" has the same answer on every screen: with the
+// other things that change rows, on the left, with a rule after it.
+function toolGroup(label, buttons) {
+  return el('div', { class: 'tool-group', title: label },
+    buttons.filter(Boolean));
+}
+
 function gridToolbar() {
   const history = view.grid.history || {};
   const selectedRowCount = sel ? size(sel).rows : 0;
+  const libraryCells = selectedLibraryCells();
+  const overridable = libraryCells.reduce((n, e) => n + e.keys.length, 0);
+  const overridden = libraryCells.reduce(
+    (n, e) => n + e.keys.filter((k) => isOverridden(e.row, k)).length, 0
+  );
 
   return el('div', { class: 'sheet-toolbar' }, [
-    button('Add row', { class: 'btn btn-primary', on: { click: () => addRow() } }),
-    button('Duplicate row', {
-      title: 'Copy the selected row and insert it below',
-      on: { click: duplicateSelected },
-    }),
-    button(selectedRowCount > 1 ? `Delete ${selectedRowCount} rows` : 'Delete row', {
-      class: 'btn btn-danger',
-      title: 'Remove the selected rows. Undoable.',
-      on: { click: deleteSelectedRows },
-    }),
-    el('span', { class: 'toolbar-gap' }),
-    button('Fill down', {
-      title: 'Copy the top cell of the selection into the rest of it (Ctrl+D)',
-      on: { click: () => fillSelection('copy') },
-    }),
-    button('Fill series', {
-      title: 'Count up from the top of the selection, e.g. RAD-001, RAD-002, RAD-003',
-      on: { click: () => fillSelection('series') },
-    }),
-    button('Paste rows…', { on: { click: pasteRows } }),
-    el('span', { class: 'toolbar-gap' }),
-    button('Undo', {
-      class: 'btn',
-      disabled: !history.can_undo,
-      title: history.can_undo ? `Undo ${history.undo_label} (Ctrl+Z)` : 'Nothing to undo',
-      on: { click: undoEdit },
-    }),
-    button('Redo', {
-      class: 'btn',
-      disabled: !history.can_redo,
-      title: history.can_redo ? `Redo ${history.redo_label}` : 'Nothing to redo',
-      on: { click: redoEdit },
-    }),
-    el('div', { class: 'legend', style: 'margin-left:auto' }, [
-      el('span', {}, [el('span', { class: 'swatch swatch-input' }), 'you type']),
-      el('span', {}, [el('span', { class: 'swatch swatch-library' }), 'from the equipment library']),
-      el('span', {}, [el('span', { class: 'swatch swatch-derived' }), 'calculated']),
+    toolGroup('Rows', [
+      button('Add row', { class: 'btn btn-primary', on: { click: () => addRow() } }),
+      button('Duplicate', {
+        title: 'Copy the selected row and insert it below',
+        on: { click: duplicateSelected },
+      }),
+      button(selectedRowCount > 1 ? `Delete ${selectedRowCount} rows` : 'Delete row', {
+        class: 'btn btn-danger',
+        title: 'Remove the selected rows. Undoable.',
+        on: { click: deleteSelectedRows },
+      }),
+    ]),
+    toolGroup('Fill', [
+      button('Fill down', {
+        title: 'Copy the top cell of the selection into the rest of it (Ctrl+D). ' +
+          'Or drag the small square at the corner of the selection.',
+        on: { click: () => fillSelection('copy') },
+      }),
+      button('Fill series', {
+        title: 'Count up from the top of the selection, e.g. RAD-001, RAD-002, RAD-003',
+        on: { click: () => fillSelection('series') },
+      }),
+      button('Paste rows…', { on: { click: pasteRows } }),
+    ]),
+    toolGroup('Equipment library', [
+      button(overridable > 1 ? `Override ${overridable} cells` : 'Override cell', {
+        disabled: !overridable,
+        title: overridable
+          ? 'Take every library cell in the selection over, so this schedule can ' +
+            'say something different from the library'
+          : 'Select one or more library (green) cells first',
+        on: { click: overrideSelection },
+      }),
+      button('Restore from library', {
+        disabled: !overridden,
+        title: overridden
+          ? `Put ${overridden} overridden cell(s) back on the library value`
+          : 'Nothing in the selection is overridden',
+        on: { click: restoreSelection },
+      }),
+    ]),
+    toolGroup('History', [
+      button('Undo', {
+        class: 'btn',
+        disabled: !history.can_undo,
+        title: history.can_undo ? `Undo ${history.undo_label} (Ctrl+Z)` : 'Nothing to undo',
+        on: { click: undoEdit },
+      }),
+      button('Redo', {
+        class: 'btn',
+        disabled: !history.can_redo,
+        title: history.can_redo ? `Redo ${history.redo_label}` : 'Nothing to redo',
+        on: { click: redoEdit },
+      }),
+    ]),
+    el('div', { class: 'toolbar-end' }, [
+      button('Columns…', {
+        title: 'Which columns show here, on the Excel export and on the PDF',
+        on: { click: columnsDialog },
+      }),
+      el('div', { class: 'legend' }, [
+        el('span', {}, [el('span', { class: 'swatch swatch-input' }), 'you type']),
+        el('span', {}, [el('span', { class: 'swatch swatch-library' }), 'library']),
+        el('span', {}, [el('span', { class: 'swatch swatch-derived' }), 'calculated']),
+      ]),
     ]),
   ]);
+}
+
+/* ---------------------------------------------------- library overrides --- */
+
+/**
+ * Take every library cell in the selection over at once.
+ *
+ * A row that diverges from the library usually diverges in company: the same
+ * unit at a different duty is a block of cells, not one. Doing them one pencil
+ * at a time is the difference between a feature somebody uses and one they work
+ * around by typing the value into the notes.
+ */
+async function overrideSelection() {
+  const entries = selectedLibraryCells();
+  if (!entries.length) {
+    toast('Select one or more library cells first', 'err');
+    return;
+  }
+
+  const edits = [];
+  let count = 0;
+  for (const { row, keys } of entries) {
+    const overrides = {};
+    for (const key of keys) {
+      if (isOverridden(row, key)) continue;
+      const current = row.computed[key];
+      // An empty override is how a cell is put back on the library, so a cell
+      // with nothing to carry over would undo itself the moment it was saved.
+      if (current === null || current === undefined || current === '') continue;
+      overrides[key] = current;
+      count += 1;
+    }
+    if (Object.keys(overrides).length) edits.push({ row_id: row.id, values: {}, overrides });
+  }
+
+  if (!edits.length) {
+    toast('Those cells have no library value to take over yet', 'err');
+    return;
+  }
+
+  try {
+    view.grid = await api.schedules.editCells(view.id, edits, 'override_cells');
+    redrawPreservingFocus();
+    toast(`${count} cell(s) taken over — type over them, or ↺ to restore`, 'ok');
+  } catch (error) { fail(error); }
+}
+
+/** Put every overridden cell in the selection back on the library value. */
+async function restoreSelection() {
+  const entries = selectedLibraryCells();
+  const edits = [];
+  let count = 0;
+  for (const { row, keys } of entries) {
+    const overrides = {};
+    for (const key of keys) {
+      if (!isOverridden(row, key)) continue;
+      overrides[key] = '';
+      draftOverrides.delete(cellKey(row.id, key));
+      count += 1;
+    }
+    if (Object.keys(overrides).length) edits.push({ row_id: row.id, values: {}, overrides });
+  }
+  if (!edits.length) {
+    toast('Nothing in the selection is overridden', 'err');
+    return;
+  }
+  try {
+    view.grid = await api.schedules.editCells(view.id, edits, 'restore_cells');
+    redrawPreservingFocus();
+    toast(`${count} cell(s) back on the library value — Ctrl+Z to undo`, 'ok');
+  } catch (error) { fail(error); }
+}
+
+/* -------------------------------------------------------------- columns --- */
+
+/**
+ * Which columns this schedule shows, and where.
+ *
+ * Three answers per column rather than one: a price belongs on the screen and
+ * in the working file and not on the copy that goes to the client. Which
+ * columns cannot be hidden comes from the server, so the screen cannot offer a
+ * switch that would produce a workbook with a broken reference in it.
+ */
+async function columnsDialog() {
+  let data;
+  try {
+    data = await api.schedules.columns(view.id);
+  } catch (error) { fail(error); return; }
+
+  const LABELS = { editor: 'On screen', xlsx: 'Excel', pdf: 'PDF' };
+  const boxes = new Map();
+
+  const rows = data.columns.map((column) => {
+    const cells = data.targets.map((target) => {
+      const box = el('input', {
+        type: 'checkbox',
+        checked: column.visibility[target] !== false,
+        disabled: !column.hideable,
+      });
+      boxes.set(`${column.legacy_name}|${target}`, box);
+      return el('td', { class: 'tick' }, [box]);
+    });
+    return el('tr', {}, [
+      el('td', {}, [
+        el('div', {}, [column.name]),
+        el('div', { class: 'muted tiny' }, [
+          column.unit ? `${column.unit} · ` : '',
+          column.kind,
+          column.reason ? ` · ${column.reason}` : '',
+        ]),
+      ]),
+      ...cells,
+    ]);
+  });
+
+  const setColumn = (target, shown) => {
+    for (const column of data.columns) {
+      if (!column.hideable) continue;
+      const box = boxes.get(`${column.legacy_name}|${target}`);
+      if (box) box.checked = shown;
+    }
+  };
+
+  const ok = await modal({
+    title: 'Columns on this schedule',
+    wide: true,
+    render: () => el('div', {}, [
+      el('p', { class: 'muted' }, [
+        'Hiding a column here changes this schedule only — the equipment type and every ' +
+        'other schedule built from it are untouched. The values are still stored; they ' +
+        'are simply not printed.',
+      ]),
+      el('div', { class: 'btn-row', style: 'margin-bottom:10px' }, data.targets.flatMap((t) => [
+        button(`All on ${LABELS[t]}`, { class: 'btn btn-sm', on: { click: () => setColumn(t, true) } }),
+      ])),
+      table(['Column', ...data.targets.map((t) => LABELS[t])], rows),
+      el('p', { class: 'muted tiny', style: 'margin-top:10px' }, [
+        'The Model Reference and any column a calculation reads cannot be hidden: the ' +
+        'workbook would come out with a broken reference in it.',
+      ]),
+    ]),
+    actions: (close) => [
+      button('Cancel', { on: { click: () => close(false) } }),
+      button('Save', { class: 'btn btn-primary', on: { click: () => close(true) } }),
+    ],
+  });
+  if (!ok) return;
+
+  const payload = {};
+  for (const column of data.columns) {
+    if (!column.hideable) continue;
+    const hidden = {};
+    for (const target of data.targets) {
+      const box = boxes.get(`${column.legacy_name}|${target}`);
+      if (box && !box.checked) hidden[target] = false;
+    }
+    if (Object.keys(hidden).length) payload[column.legacy_name] = hidden;
+  }
+
+  try {
+    await api.schedules.setColumns(view.id, payload);
+    const hiddenCount = Object.keys(payload).length;
+    view.grid = await api.schedules.grid(view.id);
+    sel = null;
+    draw();
+    toast(
+      hiddenCount
+        ? `${hiddenCount} column(s) hidden somewhere`
+        : 'Every column shows everywhere',
+      'ok'
+    );
+  } catch (error) { fail(error); }
 }
 
 function refreshToolbar() {
@@ -565,8 +806,9 @@ function cellNode(r, c) {
 
 function paintSelection() {
   for (const { td } of cellIndex.values()) {
-    td.classList.remove('sel', 'sel-focus');
+    td.classList.remove('sel', 'sel-focus', 'fill-preview');
   }
+  document.querySelectorAll('.fill-handle').forEach((n) => n.remove());
   if (!sel) { refreshToolbar(); return; }
   const box = bounds(sel);
   for (const { r, c } of selectedCells(sel)) {
@@ -575,6 +817,8 @@ function paintSelection() {
   }
   const focused = cellNode(sel.focus.r, sel.focus.c);
   if (focused) focused.classList.add('sel-focus');
+  paintFillPreview();
+  attachFillHandle(box);
   // The row numbers show the extent too, so a tall selection is obvious even
   // when the top of it has scrolled away.
   document.querySelectorAll('.sheet tbody tr').forEach((tr, index) => {
@@ -609,6 +853,7 @@ function cellFromEvent(event) {
 
 function onMouseDown(event) {
   if (event.button !== 0) return;
+  dismissFillChip();
   const cell = cellFromEvent(event);
   if (!cell) return;
 
@@ -641,6 +886,13 @@ function onRowNumberDown(event, index) {
 }
 
 function onMouseOver(event) {
+  if (fillDrag) {
+    const cell = cellFromEvent(event);
+    if (!cell || cell.r === fillDrag.to) return;
+    fillDrag.to = cell.r;
+    paintFillPreview();
+    return;
+  }
   if (!dragging || !sel) return;
   const cell = cellFromEvent(event);
   if (!cell) return;
@@ -651,6 +903,156 @@ function onMouseOver(event) {
 
 function endDrag() {
   dragging = false;
+}
+
+/* ----------------------------------------------------------- fill handle --- */
+
+/**
+ * The small square at the corner of the selection, dragged to fill.
+ *
+ * This is the one spreadsheet gesture the grid was missing, and its absence is
+ * why typing RAD-001 and dragging it down — the single most common thing anyone
+ * does on a schedule — meant finding a button in a toolbar instead. Dragging it
+ * counts up where the value ends in digits, as Excel does; holding Ctrl copies
+ * instead, and the chip that appears afterwards offers the other one.
+ */
+function attachFillHandle(box) {
+  const corner = cellNode(box.bottom, box.right);
+  if (!corner) return;
+  corner.appendChild(el('div', {
+    class: 'fill-handle',
+    title: 'Drag to fill. Counts up from a reference ending in digits; hold Ctrl to copy.',
+    on: { mousedown: (event) => startFillDrag(event, box) },
+  }));
+}
+
+function startFillDrag(event, box) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  fillDrag = { box, to: box.bottom, copy: event.ctrlKey || event.metaKey };
+  dismissFillChip();
+  document.addEventListener('mouseup', endFillDrag, { once: true });
+}
+
+function paintFillPreview() {
+  for (const { td } of cellIndex.values()) td.classList.remove('fill-preview');
+  if (!fillDrag) return;
+  const { box, to } = fillDrag;
+  const top = Math.min(to, box.top);
+  const bottom = Math.max(to, box.bottom);
+  for (let r = top; r <= bottom; r += 1) {
+    if (r >= box.top && r <= box.bottom) continue;
+    for (let c = box.left; c <= box.right; c += 1) {
+      const node = cellNode(r, c);
+      if (node) node.classList.add('fill-preview');
+    }
+  }
+}
+
+async function endFillDrag(event) {
+  const drag = fillDrag;
+  fillDrag = null;
+  if (!drag) return;
+  paintFillPreview();
+  const copy = drag.copy || event.ctrlKey || event.metaKey;
+
+  const down = drag.to > drag.box.bottom;
+  const count = down ? drag.to - drag.box.bottom : drag.box.top - drag.to;
+  if (count <= 0) { paintSelection(); return; }
+
+  // Down fills from the bottom row of the selection, up from the top: the seed
+  // is whichever end the drag started away from, as it is in a spreadsheet.
+  const seedIndex = down ? drag.box.bottom : drag.box.top;
+  await runFill({
+    seedIndex,
+    left: drag.box.left,
+    right: drag.box.right,
+    count,
+    direction: down ? 'down' : 'up',
+    mode: copy ? 'copy' : 'series',
+  });
+}
+
+/** Carry out one fill, and leave the chip that offers the other mode. */
+async function runFill(request) {
+  const seed = rowAt(request.seedIndex);
+  if (!seed) return;
+
+  const columns = [];
+  for (let c = request.left; c <= request.right; c += 1) {
+    const column = columnAt(c);
+    if (column && column.editable) columns.push(column.legacy_name);
+  }
+  if (!columns.length) {
+    toast('Those columns are calculated or looked up, so they cannot be filled', 'err');
+    paintSelection();
+    return;
+  }
+
+  try {
+    await flushRow(seed);
+    view.grid = await api.schedules.fill(view.id, {
+      columns,
+      start_position: seed.position,
+      count: request.count,
+      mode: request.mode,
+      direction: request.direction,
+    });
+    lastFill = request;
+    // Extend the selection over what was just filled, as a spreadsheet does.
+    const far = request.direction === 'down'
+      ? request.seedIndex + request.count
+      : request.seedIndex - request.count;
+    sel = { anchor: { r: request.seedIndex, c: request.left }, focus: { r: far, c: request.right } };
+    redrawPreservingFocus();
+    showFillChip(far, request);
+  } catch (error) { fail(error); }
+}
+
+let fillChip = null;
+
+function dismissFillChip() {
+  if (fillChip) { fillChip.remove(); fillChip = null; }
+}
+
+/**
+ * Excel's autofill options button, in the one form that earns its place.
+ *
+ * "Usually a series, but give me the option" is exactly what this is: the fill
+ * has already happened the way it usually should, and changing your mind is one
+ * click rather than an undo and a different button.
+ */
+function showFillChip(atRow, request) {
+  dismissFillChip();
+  const anchor = cellNode(atRow, request.right);
+  if (!anchor) return;
+
+  const other = request.mode === 'series' ? 'copy' : 'series';
+  const label = other === 'copy' ? 'Copy the same value instead' : 'Count up instead';
+
+  const chip = el('div', { class: 'fill-chip' }, [
+    el('span', {
+      class: 'tiny',
+      text: request.mode === 'series' ? 'Counted up' : 'Copied down',
+    }),
+    el('button', {
+      class: 'btn btn-sm',
+      on: {
+        click: async () => {
+          dismissFillChip();
+          await runFill({ ...request, mode: other });
+        },
+      },
+    }, [label]),
+  ]);
+
+  const box = anchor.getBoundingClientRect();
+  chip.style.top = `${box.bottom + 4}px`;
+  chip.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - 260))}px`;
+  document.body.appendChild(chip);
+  fillChip = chip;
+  setTimeout(() => { if (fillChip === chip) dismissFillChip(); }, 8000);
 }
 
 /* ------------------------------------------------------------- keyboard --- */
@@ -1099,7 +1501,9 @@ function absorb(fresh) {
     }
   });
 
-  refreshToolbar();
+  // Repaints the selection as well as the toolbar, because a patched cell has
+  // lost the classes and the fill handle that were sitting on it.
+  paintSelection();
   renderProblemSummary(document.querySelector('.page-wide > div:last-child'));
 }
 

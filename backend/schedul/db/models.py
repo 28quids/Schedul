@@ -186,6 +186,16 @@ class Project(TimestampMixin, Base):
     #: code. Additions only -- a project cannot remove or reorder base columns,
     #: or two projects' schedules of the same type stop being comparable.
     type_extras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: What this job's documents show, over the organisation's branding.
+    #:
+    #: Only the parts a job legitimately differs on: which cover and revision
+    #: fields appear, in what order, and the cover's subtitle. Fonts, colours
+    #: and the logo stay house standard -- the point of a house standard is that
+    #: every document that leaves the office looks like it came from the same
+    #: place, and a per-project font would quietly end that.
+    branding_overrides: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     #: Notes this job adds under the organisation's own, on every schedule in it.
     #: The middle layer of core.notes' organisation -> project -> type -> schedule
     #: resolution. Empty means the project adds nothing, which is the usual case.
@@ -309,6 +319,17 @@ class Schedule(TimestampMixin, Base):
     #: creation. Denormalised so numbering can scope to it and so changing a
     #: type's volume later cannot silently re-file an existing schedule.
     volume: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    #: Columns this one schedule hides, keyed by column name.
+    #:
+    #: ``{"Price (GBP)": {"pdf": False, "xlsx": False}}`` -- an absent target
+    #: means shown, so a schedule saved before this existed needs no migration.
+    #: Kept on the schedule rather than the type because "do not put the cost on
+    #: the client's copy of this one" is a decision about one document, and
+    #: pushing it up to the catalogue would change every schedule in the
+    #: practice to answer a question about one of them.
+    column_visibility: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     #: This schedule's own notes, or None to inherit the resolved layers above.
     #:
     #: Null rather than an empty list on purpose: "inherit" and "deliberately no

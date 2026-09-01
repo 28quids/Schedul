@@ -183,6 +183,16 @@ class GridColumn(BaseModel):
     project_extra: bool = False
 
 
+class ColumnVisibilityIn(BaseModel):
+    """Which columns this schedule hides, and where.
+
+    ``{"Price (GBP)": {"pdf": false, "xlsx": false}}``. A target left out means
+    the column shows there, so the payload only ever carries the exceptions.
+    """
+
+    columns: dict[str, dict[str, bool]] = Field(default_factory=dict)
+
+
 class RowOut(BaseModel):
     id: str
     position: int
@@ -300,6 +310,9 @@ class FillIn(BaseModel):
     #: How many rows below the start to fill. Omit to reach the end.
     count: int | None = None
     mode: Literal["series", "copy"] = "series"
+    #: Which way the fill runs. A spreadsheet's fill handle drags both ways, and
+    #: dragging up from RAD-005 counts down rather than repeating it.
+    direction: Literal["down", "up"] = "down"
 
     @property
     def target_columns(self) -> list[str]:

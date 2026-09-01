@@ -220,3 +220,137 @@ class TestPayloadGuards:
     def test_a_column_can_be_named_without_its_unit(self):
         cleaned = override_payload({"Output at dT50": 820}, a_type())
         assert cleaned == {"Output at dT50 (W)": 820}
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+class TestPerScheduleVisibilityThroughTheApi:
+    """One schedule hiding a column on its own deliverables.
+
+    The catalogue says where a column belongs in general; this is the answer to
+    "keep the cost off the copy that goes to this client", which is a decision
+    about one document and must not reach the type or any other schedule.
+    """
+
+    @pytest.fixture()
+    def client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("SCHEDUL_DATABASE_URL", f"sqlite:///{tmp_path / 'vis.db'}")
+        import schedul.db.session as session_module
+
+        session_module.SessionLocal = None
+        session_module.init_db(f"sqlite:///{tmp_path / 'vis.db'}")
+        from schedul.api.main import app
+
+        return TestClient(app)
+
+    @pytest.fixture()
+    def schedule(self, client):
+        project = client.post(
+            "/api/projects", json={"number": "CM1", "name": "Head Office"}
+        ).json()
+        building = project["buildings"][0]["id"]
+        made = client.post(
+            f"/api/projects/{project['id']}/buildings/{building}/schedules",
+            json={"code": "MVHR"},
+        ).json()
+        sid = made["buildings"][0]["schedules"][0]["id"]
+        client.post(f"/api/schedules/{sid}/rows", json={
+            "values": {"Unit Reference": "MVHR-01", "Supply Airflow (l/s)": 450},
+        })
+        return sid
+
+    def _hideable(self, client, schedule, kind="input"):
+        data = client.get(f"/api/schedules/{schedule}/columns").json()
+        return next(
+            c for c in data["columns"] if c["hideable"] and c["kind"] == kind
+        )
+
+    def test_every_column_says_where_it_shows(self, client, schedule):
+        data = client.get(f"/api/schedules/{schedule}/columns").json()
+        assert data["targets"] == ["editor", "xlsx", "pdf"]
+        assert all(set(c["visibility"]) == {"editor", "xlsx", "pdf"} for c in data["columns"])
+        assert all(c["visibility"]["pdf"] for c in data["columns"]), "nothing hidden yet"
+
+    def test_the_lookup_key_cannot_be_hidden(self, client, schedule):
+        data = client.get(f"/api/schedules/{schedule}/columns").json()
+        reference = next(c for c in data["columns"] if c["name"] == "Model Reference")
+        assert not reference["hideable"]
+        response = client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {"Model Reference": {"pdf": False}},
+        })
+        assert response.status_code == 400
+
+    def test_a_column_a_calculation_reads_cannot_be_hidden(self, client, schedule):
+        data = client.get(f"/api/schedules/{schedule}/columns").json()
+        blocked = [c for c in data["columns"] if not c["hideable"] and c["reason"].startswith("read by")]
+        assert blocked, "this type has derived columns, so something must be read"
+        response = client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {blocked[0]["legacy_name"]: {"xlsx": False}},
+        })
+        assert response.status_code == 400
+        assert "read by" in response.text
+
+    def test_hiding_a_column_takes_it_off_the_workbook(self, client, schedule):
+        column = self._hideable(client, schedule)
+        before = load_workbook(
+            __import__("io").BytesIO(
+                client.get(f"/api/schedules/{schedule}/export.xlsx").content
+            )
+        )["Schedule"]
+        headers = [before.cell(4, c).value for c in range(1, 30)]
+        assert column["name"] in headers
+
+        client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {column["legacy_name"]: {"xlsx": False, "pdf": False}},
+        })
+        after = load_workbook(
+            __import__("io").BytesIO(
+                client.get(f"/api/schedules/{schedule}/export.xlsx").content
+            )
+        )["Schedule"]
+        assert column["name"] not in [after.cell(4, c).value for c in range(1, 30)]
+
+    def test_hiding_it_on_the_export_leaves_it_on_the_screen(self, client, schedule):
+        column = self._hideable(client, schedule)
+        client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {column["legacy_name"]: {"xlsx": False, "pdf": False}},
+        })
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert column["legacy_name"] in [c["legacy_name"] for c in grid["columns"]], (
+            "hidden on the deliverable is not hidden in the editor"
+        )
+
+    def test_hiding_it_on_screen_takes_it_out_of_the_grid(self, client, schedule):
+        column = self._hideable(client, schedule)
+        client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {column["legacy_name"]: {"editor": False}},
+        })
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert column["legacy_name"] not in [c["legacy_name"] for c in grid["columns"]]
+
+    def test_the_value_is_kept_not_deleted(self, client, schedule):
+        client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {"Unit Reference": {"editor": False, "xlsx": False, "pdf": False}},
+        })
+        client.put(f"/api/schedules/{schedule}/columns", json={"columns": {}})
+        grid = client.get(f"/api/schedules/{schedule}").json()
+        assert grid["rows"][0]["values"]["Unit Reference"] == "MVHR-01"
+
+    def test_it_is_this_schedule_only(self, client, schedule):
+        column = self._hideable(client, schedule)
+        client.put(f"/api/schedules/{schedule}/columns", json={
+            "columns": {column["legacy_name"]: {"xlsx": False}},
+        })
+        # A second schedule of the same type on the same job is untouched.
+        project_id = client.get(f"/api/schedules/{schedule}").json()["project_id"]
+        project = client.get(f"/api/projects/{project_id}").json()
+        building = project["buildings"][0]["id"]
+        other = client.post(
+            f"/api/projects/{project_id}/buildings/{building}/schedules",
+            json={"code": "FCU"},
+        ).json()
+        assert other["buildings"][0]["schedules"]
+        again = client.get(f"/api/schedules/{schedule}/columns").json()
+        hidden = [c for c in again["columns"] if not c["visibility"]["xlsx"]]
+        assert [c["legacy_name"] for c in hidden] == [column["legacy_name"]]
