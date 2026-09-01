@@ -24,8 +24,8 @@ import { api } from '../api.js';
 import { go, setContext, store } from '../app.js';
 import {
   anchoredList, button, card, clear, confirmDialog, debounce, download, el, empty,
-  fail, field, formatDate, input, modal, mount, notice, pill, select, show, table,
-  toast,
+  fail, field, formatDate, input, modal, mount, notice, pageHead, pill, select, show,
+  table, toast, toolbar,
 } from '../ui.js';
 import {
   bounds, cellSelection, cells as selectedCells, clampTo, columns as selectedColumns,
@@ -113,26 +113,27 @@ function draw() {
       building_count > 1 ? `${building_ref} / ` : '',
       schedule.code,
     ]),
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: schedule.title }),
-        el('div', { class: 'sub' }, [el('span', { class: 'dn', text: schedule.docnum })]),
-      ]),
-      el('div', { class: 'btn-row' }, [
+    pageHead(
+      schedule.title,
+      el('span', { class: 'dn', text: schedule.docnum }),
+      [
         schedule.locked ? pill('issued', 'amber') : null,
         el('span', { class: 'saving', id: 'save-state' }),
         // An export is a document being sent to somebody, so it is plain by
         // default. The working copy keeps the editing colours for anyone who
         // wants the file to look like the screen they typed it into.
-        button('Export .xlsx', {
-          title: 'The issued document: neutral print styling, no editing colours',
-          on: { click: () => download(`/api/schedules/${view.id}/export.xlsx`) },
-        }),
         button('Working copy', {
           title: 'The same numbers, with the editing colours kept',
           on: {
             click: () => download(`/api/schedules/${view.id}/export.xlsx?theme=editor`),
           },
+        }),
+        // Whichever deliverable this machine can produce is the primary action:
+        // without LibreOffice there was no primary button on the page at all.
+        button('Export .xlsx', {
+          class: store.pdfAvailable ? 'btn' : 'btn btn-primary',
+          title: 'The issued document: neutral print styling, no editing colours',
+          on: { click: () => download(`/api/schedules/${view.id}/export.xlsx`) },
         }),
         store.pdfAvailable
           ? button('Export PDF', {
@@ -140,8 +141,8 @@ function draw() {
               on: { click: () => download(`/api/schedules/${view.id}/export.pdf`) },
             })
           : null,
-      ]),
-    ]),
+      ]
+    ),
     el('div', { class: 'tabs' }, [
       ['schedule', `Schedule (${view.grid.rows.length})`],
       ['revisions', `Revisions (${view.revisions.length})`],
@@ -296,14 +297,6 @@ function selectedLibraryCells() {
   return out;
 }
 
-// One group of related buttons. Every toolbar in the app is built from these,
-// so "where is the delete button" has the same answer on every screen: with the
-// other things that change rows, on the left, with a rule after it.
-function toolGroup(label, buttons) {
-  return el('div', { class: 'tool-group', title: label },
-    buttons.filter(Boolean));
-}
-
 function gridToolbar() {
   const history = view.grid.history || {};
   const selectedRowCount = sel ? size(sel).rows : 0;
@@ -313,8 +306,8 @@ function gridToolbar() {
     (n, e) => n + e.keys.filter((k) => isOverridden(e.row, k)).length, 0
   );
 
-  return el('div', { class: 'sheet-toolbar' }, [
-    toolGroup('Rows', [
+  return toolbar([
+    ['Rows', [
       button('Add row', { class: 'btn btn-primary', on: { click: () => addRow() } }),
       button('Duplicate', {
         title: 'Copy the selected row and insert it below',
@@ -325,8 +318,8 @@ function gridToolbar() {
         title: 'Remove the selected rows. Undoable.',
         on: { click: deleteSelectedRows },
       }),
-    ]),
-    toolGroup('Fill', [
+    ]],
+    ['Fill', [
       button('Fill down', {
         title: 'Copy the top cell of the selection into the rest of it (Ctrl+D). ' +
           'Or drag the small square at the corner of the selection.',
@@ -337,8 +330,8 @@ function gridToolbar() {
         on: { click: () => fillSelection('series') },
       }),
       button('Paste rows…', { on: { click: pasteRows } }),
-    ]),
-    toolGroup('Equipment library', [
+    ]],
+    ['Equipment library', [
       button(overridable > 1 ? `Override ${overridable} cells` : 'Override cell', {
         disabled: !overridable,
         title: overridable
@@ -354,8 +347,8 @@ function gridToolbar() {
           : 'Nothing in the selection is overridden',
         on: { click: restoreSelection },
       }),
-    ]),
-    toolGroup('History', [
+    ]],
+    ['History', [
       button('Undo', {
         class: 'btn',
         disabled: !history.can_undo,
@@ -368,17 +361,16 @@ function gridToolbar() {
         title: history.can_redo ? `Redo ${history.redo_label}` : 'Nothing to redo',
         on: { click: redoEdit },
       }),
-    ]),
-    el('div', { class: 'toolbar-end' }, [
-      button('Columns…', {
-        title: 'Which columns show here, on the Excel export and on the PDF',
-        on: { click: columnsDialog },
-      }),
-      el('div', { class: 'legend' }, [
-        el('span', {}, [el('span', { class: 'swatch swatch-input' }), 'you type']),
-        el('span', {}, [el('span', { class: 'swatch swatch-library' }), 'library']),
-        el('span', {}, [el('span', { class: 'swatch swatch-derived' }), 'calculated']),
-      ]),
+    ]],
+  ], [
+    button('Columns…', {
+      title: 'Which columns show here, on the Excel export and on the PDF',
+      on: { click: columnsDialog },
+    }),
+    el('div', { class: 'legend' }, [
+      el('span', {}, [el('span', { class: 'swatch swatch-input' }), 'you type']),
+      el('span', {}, [el('span', { class: 'swatch swatch-library' }), 'library']),
+      el('span', {}, [el('span', { class: 'swatch swatch-derived' }), 'calculated']),
     ]),
   ]);
 }
@@ -471,6 +463,9 @@ async function columnsDialog() {
   } catch (error) { fail(error); return; }
 
   const LABELS = { editor: 'On screen', xlsx: 'Excel', pdf: 'PDF' };
+  const SHOW_ALL = {
+    editor: 'Show all on screen', xlsx: 'Show all in Excel', pdf: 'Show all in PDF',
+  };
   const boxes = new Map();
 
   const rows = data.columns.map((column) => {
@@ -513,9 +508,9 @@ async function columnsDialog() {
         'other schedule built from it are untouched. The values are still stored; they ' +
         'are simply not printed.',
       ]),
-      el('div', { class: 'btn-row', style: 'margin-bottom:10px' }, data.targets.flatMap((t) => [
-        button(`All on ${LABELS[t]}`, { class: 'btn btn-sm', on: { click: () => setColumn(t, true) } }),
-      ])),
+      el('div', { class: 'btn-row', style: 'margin-bottom:10px' }, data.targets.map((t) =>
+        button(SHOW_ALL[t], { class: 'btn btn-sm', on: { click: () => setColumn(t, true) } })
+      )),
       table(['Column', ...data.targets.map((t) => LABELS[t])], rows),
       el('p', { class: 'muted tiny', style: 'margin-top:10px' }, [
         'The Model Reference and any column a calculation reads cannot be hidden: the ' +

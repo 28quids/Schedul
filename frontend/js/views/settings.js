@@ -5,8 +5,8 @@
 
 import { api } from '../api.js';
 import {
-  button, card, clear, download, el, fail, field, input, mount, notice, pill,
-  select, table, toast,
+  button, card, clear, download, el, fail, field, input, mount, notice, pageHead,
+  pill, select, table, toast,
 } from '../ui.js';
 import { brandingSection } from './branding.js';
 
@@ -17,15 +17,10 @@ export async function settingsView() {
   const house = settings.house_standard;
 
   const page = el('div', { class: 'page' }, [
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: 'House standard' }),
-        el('div', {
-          class: 'sub',
-          text: `${settings.organisation.name} · ISO 19650 field structure, with your token values and wording.`,
-        }),
-      ]),
-    ]),
+    pageHead(
+      'House standard',
+      `${settings.organisation.name} · ISO 19650 field structure, with your token values and wording.`
+    ),
     el('div', { class: 'tabs' }, [
       ['numbering', 'Numbering'],
       ['content', 'Notes and constants'],

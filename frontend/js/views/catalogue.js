@@ -2,23 +2,20 @@
 
 import { api } from '../api.js';
 import { go, store } from '../app.js';
-import { button, el, empty, fail, mount, pill, table, toast, confirmDialog } from '../ui.js';
+import {
+  button, confirmDialog, el, empty, fail, mount, pageHead, pill, table, toast,
+} from '../ui.js';
 
 export async function catalogueView() {
   const [types, meta] = await Promise.all([api.catalogue.list(), api.catalogue.meta()]);
   store.catalogue = types;
 
   const page = el('div', { class: 'page' }, [
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: 'Schedule types' }),
-        el('div', {
-          class: 'sub',
-          text: 'The reusable shape of each kind of schedule: its columns, its formulas and its own notes.',
-        }),
-      ]),
-      button('New type', { class: 'btn btn-primary', on: { click: () => go('/catalogue/new') } }),
-    ]),
+    pageHead(
+      'Schedule types',
+      'The reusable shape of each kind of schedule: its columns, its formulas and its own notes.',
+      [button('New type', { class: 'btn btn-primary', on: { click: () => go('/catalogue/new') } })]
+    ),
   ]);
 
   if (!types.length) {

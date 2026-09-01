@@ -275,7 +275,7 @@ function headerTable(code, columns) {
   const headerLine = columns.join('\t');
   return el('section', { class: 'panel' }, [
     el('div', { class: 'panel-head' }, [
-      el('strong', { text: `What a ${code} product carries` }),
+      el('strong', { text: `What ${code} products carry` }),
       el('div', { class: 'btn-row' }, [
         button('Copy headings', {
           class: 'btn btn-sm',

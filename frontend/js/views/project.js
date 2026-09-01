@@ -8,7 +8,7 @@ import { api } from '../api.js';
 import { go, refresh, setContext, store } from '../app.js';
 import {
   button, card, clear, confirmDialog, download, el, empty, fail, field, formatDate,
-  input, modal, mount, notice, pill, select, show, table, toast,
+  input, modal, mount, notice, pageHead, pill, select, show, table, toast,
 } from '../ui.js';
 
 let state = { project: null, buildingId: null, tab: 'schedules', query: '' };
@@ -71,35 +71,33 @@ function draw() {
     el('div', { class: 'crumbs' }, [
       el('a', { href: '#/projects', text: 'Projects' }), ' / ', p.number || p.name || 'Project',
     ]),
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: p.name || p.number || 'Untitled project' }),
-        el('div', { class: 'sub' }, [
-          `${p.number || 'no number'} · ${p.client || 'no client'} · `,
-          `${p.schedule_count} schedule${p.schedule_count === 1 ? '' : 's'}`,
-          multi ? ` across ${p.buildings.length} buildings` : '',
-        ]),
-      ]),
-      el('div', { class: 'btn-row' }, [
-        button('Export all (.xlsx)', {
-          title: 'Every schedule as an issued document, in one zip',
-          on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=xlsx`) },
+    pageHead(
+      p.name || p.number || 'Untitled project',
+      `${p.number || 'no number'} · ${p.client || 'no client'} · ` +
+        `${p.schedule_count} schedule${p.schedule_count === 1 ? '' : 's'}` +
+        (multi ? ` across ${p.buildings.length} buildings` : ''),
+      [
+        button('MAINPROJECTINFO', {
+          title: 'The master setup and read document, as a workbook',
+          on: { click: () => download(`/api/projects/${p.id}/projectinfo.xlsx`) },
         }),
         store.pdfAvailable
           ? button('Export all (PDF)', {
               on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=pdf`) },
             })
           : null,
+        button('Export all (.xlsx)', {
+          title: 'Every schedule as an issued document, in one zip',
+          on: { click: () => download(`/api/projects/${p.id}/export.zip?fmt=xlsx`) },
+        }),
+        // The one thing this screen is for once a project is under way.
         button('Issue a revision…', {
+          class: 'btn btn-primary',
           title: 'Append the next revision across several schedules at once',
           on: { click: () => bulkRevision() },
         }),
-        button('MAINPROJECTINFO', {
-          title: 'The master setup and read document, as a workbook',
-          on: { click: () => download(`/api/projects/${p.id}/projectinfo.xlsx`) },
-        }),
-      ]),
-    ]),
+      ]
+    ),
     tabs(),
   ]);
 

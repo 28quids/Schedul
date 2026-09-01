@@ -103,6 +103,7 @@ backend/schedul/
               importing.py a supplier's product list, planned before it is applied
               impact.py   why a schedule says something different from last week
   export/     the vendored sheet construction, and PDF via LibreOffice
+              library.py  the equipment library as a workbook, out and back
   api/        FastAPI over the services
 frontend/     no build step: ES modules served by the backend
   js/grid/    the selection model, keyboard rules and block-paste planner, with
@@ -119,6 +120,17 @@ Shift+Arrow to extend the selection, Ctrl+C and Ctrl+V for a block, Delete to
 clear one, Ctrl+D to fill down, Ctrl+Z to undo. Undo covers the operations that
 rewrite several rows at once — paste, delete, duplicate, fill — and is a restore
 from a recorded state rather than an inverse operation worked out per action.
+
+The selection carries the corner **fill handle**, and it behaves as Excel's
+does: dragging it counts up from a reference ending in digits (`RAD-001`,
+`RAD-002`), holding Ctrl copies instead, and dragging upwards counts down. A
+chip afterwards offers the other one, so changing your mind is a click rather
+than an undo and a different button. The increment rule stays in
+`core/references.py` — the browser sends a direction and a count, never a list
+of values — so a drag, the toolbar button and an importer all agree.
+
+Library cells can be taken over and put back a **selection at a time**: a row
+that diverges from the library usually diverges in company.
 
 Pasting is planned before it happens. The preview says how many rows were found,
 whether the first line was a header, and what would be appended, inserted or
@@ -144,6 +156,20 @@ An **export** drops it. A file that leaves the office is read, not filled in, so
 `export.xlsx` and the PDF both default to a neutral print theme;
 `?theme=editor` gives the working colours back. The two hold identical values.
 
+### Hiding a column on one schedule
+
+A column can be hidden on the screen, on the Excel export and on the PDF
+independently, per schedule — which is how a `Price` column stays in the working
+file and off the client's copy. It is stored on the schedule rather than the
+type, because it is a decision about one document; the type and every other
+schedule built from it are untouched, and the values are kept rather than
+deleted.
+
+The lookup key and any column a calculation reads are refused rather than
+half-hidden: the API says which formula needs the column, and the renderer
+leaves such a cell blank rather than emitting a reference to a column that is
+not on the sheet.
+
 ### Notes
 
 Notes come from four places, printed general to specific: the practice's
@@ -160,6 +186,31 @@ rather than a document designer — the hand-made branded originals contain
 drawing objects that cannot be round-tripped, so what is offered is what the
 renderer can carry out honestly. A field the workbook reads by formula cannot be
 hidden.
+
+**A project can differ, about which fields show and nothing else.** A job with
+no blocks does not want a Building row and a job with three does, and settling
+that once for the whole practice was a lie the settings screen used to tell.
+Each field has three states per project — follow the practice, always show,
+always hide — so a job does not silently freeze its answer at whatever the
+standard said the day it was created. Fonts, colours and the logo stay house
+standard: the point of a house standard is that every document that leaves the
+office looks like it came from the same place.
+
+### The equipment library as a workbook
+
+Products get in three ways and all three end at the same planner: typed on a
+schedule, pasted as a block, or filled into the workbook the library hands out —
+a blank template, one type's entries, or the whole library as one file with a
+sheet per type. That last is the mass route: take everything out, correct it in
+Excel where correcting a hundred rows is a drag of the fill handle, and bring
+the same file back.
+
+One renderer produces all three, so the file that comes back always matches the
+file that went out. Reading one back goes through
+`services/importing.py` — the planner a pasted block already uses — so the
+duplicate handling, the "a blank cell means not stated" rule and the
+plan-before-it-happens guarantee are the ones that already exist. A sheet whose
+tab does not name a schedule type is reported rather than guessed at.
 
 ### One formula, two engines
 
@@ -182,7 +233,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-510 tests. The ones worth knowing about:
+545 tests. The ones worth knowing about:
 
 - **`test_formula.py`** — Excel's semantics where they differ from Python's,
   including `-2^2 = 4`, and that emitted Excel re-parses to the same value.
@@ -202,6 +253,13 @@ pytest
   issue theme and the editor theme hold the same numbers.
 - **`test_frontend.py`** — runs the grid's selection and keyboard rules under
   Node. Skips itself when Node is not installed.
+- **`test_columns.py`** — a schedule hiding a column on one target and not
+  another, and the two things it is refused: the lookup key, and a column a
+  formula reads.
+- **`test_importing.py`** — the library workbook round trip: an export that
+  comes back as no change at all, and a blank template that imports as nothing.
+- **`test_storage.py`** — the database is never inside the checkout, an older
+  one is adopted rather than overwritten, and a backup is a database that opens.
 
 Tests needing LibreOffice skip themselves when it is not installed, as do the
 front-end ones when Node is not.

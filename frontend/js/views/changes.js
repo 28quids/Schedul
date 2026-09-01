@@ -9,7 +9,8 @@
 import { api } from '../api.js';
 import { go } from '../app.js';
 import {
-  button, card, clear, el, empty, fail, formatDate, mount, notice, pill, table,
+  button, card, clear, el, empty, fail, formatDate, mount, notice, pageHead, pill,
+  table,
 } from '../ui.js';
 
 const AREAS = [
@@ -29,16 +30,11 @@ export async function changesView() {
   const log = await api.impact(state.area);
 
   const page = el('div', { class: 'page page-wide' }, [
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: 'Changes' }),
-        el('div', {
-          class: 'sub',
-          text: 'What has moved across the practice, and what it lands on. ' +
-                'A schedule can change without anybody opening it.',
-        }),
-      ]),
-    ]),
+    pageHead(
+      'Changes',
+      'What has moved across the practice, and what it lands on. ' +
+      'A schedule can change without anybody opening it.'
+    ),
     el('div', { class: 'seg' }, AREAS.map(([key, label]) =>
       el('button', {
         class: state.area === key ? 'active' : '',

@@ -9,7 +9,7 @@ import { api } from '../api.js';
 import { store } from '../app.js';
 import {
   button, card, clear, confirmDialog, download, el, empty, fail, field, formatDate,
-  input, modal, mount, notice, pill, select, show, table, toast,
+  input, modal, mount, notice, pageHead, pill, select, show, table, toast,
 } from '../ui.js';
 import { importProducts, importWorkbook, productGrid } from './library-entry.js';
 
@@ -23,17 +23,12 @@ export async function libraryView() {
   if (!state.code && types.length) state.code = types[0].code;
 
   const page = el('div', { class: 'page page-wide' }, [
-    el('header', { class: 'page-head' }, [
-      el('div', {}, [
-        el('h1', { text: 'Equipment library' }),
-        el('div', {
-          class: 'sub',
-          text: 'Every product this practice has scheduled. Entered once, then available on every schedule.',
-        }),
-      ]),
-      // The whole-library round trip: everything out as one workbook, a sheet
-      // per type, corrected in Excel and brought back.
-      el('div', { class: 'btn-row' }, [
+    // The whole-library round trip: everything out as one workbook, a sheet
+    // per type, corrected in Excel and brought back.
+    pageHead(
+      'Equipment library',
+      'Every product this practice has scheduled. Entered once, then available on every schedule.',
+      [
         button('Blank workbook', {
           title: 'Every type’s headings and an example row, ready to fill in',
           on: { click: () => download(api.library.workbookUrl('', false)) },
@@ -47,8 +42,8 @@ export async function libraryView() {
           title: 'Read a filled-in workbook back, a sheet at a time',
           on: { click: async () => { if (await importWorkbook()) libraryView(); } },
         }),
-      ]),
-    ]),
+      ]
+    ),
     el('div', { class: 'tabs' }, [
       ['browse', 'Browse'],
       ['review', 'Needs review'],

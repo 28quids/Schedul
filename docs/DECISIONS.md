@@ -420,3 +420,105 @@ compares the models against the database and adds what is missing. Deliberately
 one-directional: nothing there drops a column, renames one, or rewrites a value.
 An additive change is the only kind that cannot destroy somebody's work, and
 anything beyond it deserves a real migration tool and a backup.
+
+## The cover was two pages, and nobody could see why
+
+The front cover began on row 11, and its print area was a fixed `A1:G50`. Fifty
+rows of fifteen points plus two title rows of forty and eighty-seven is about
+850 points; an A4 page with the default margins holds about 734. Every cover the
+tool produced spilled onto a second sheet, and the ten blank rows at the top
+were doing nothing but making it worse.
+
+Both are gone. The fields start on row 1, the print area follows the content,
+and the title block is placed in the middle of the space left below the fields
+rather than at a fixed row 41 — pushed down only when a long field list leaves
+no slack, because overflowing a page is worse than not being centred.
+`fitToHeight = 1` on the cover is the guarantee behind the arithmetic: a cover is
+one page by definition, so it says so rather than hoping.
+
+The revision page had the mirror problem in the other direction — the log sat at
+a hardcoded row 44 with a note in the gap explaining that the summary rows derive
+from it. The note was true and belonged in the code, not on a document somebody
+issues, so the log now follows the summary block by two rows and the gap closed
+with it.
+
+## Block capitals, and the building in the title
+
+A house title block is set in capitals whatever was typed into the project form,
+and on a job of several blocks the block is half of what identifies the
+document. `MOTE ROAD - BLOCK A`, stored once on Config and read by both title
+blocks, so a rename is still one write.
+
+Only a building's *name* is appended. A single-building job carries a reference
+the manager allocated rather than a block anybody named, and `HEAD OFFICE - CM1`
+says nothing the document number does not.
+
+## Hiding a column is a decision about one document
+
+Column visibility already existed on the catalogue type: where a column belongs
+in general. What was missing was the answer to "keep the cost off the copy that
+goes to this client", which is about one schedule, and pushing it up to the type
+would change every schedule in the practice to settle a question about one.
+
+So a schedule carries its own show/hide map, per target — screen, Excel, PDF —
+folded in before the target filter, so `columns_for(schedule, target="pdf")` is
+the honest answer wherever it is asked. Two columns are refused rather than
+half-hidden: the lookup key, and any column a visible formula reads. The
+renderer also guards the emit itself, leaving such a cell blank rather than
+writing a reference to a column that is not on the sheet — a workbook with
+`#REF!` in it is worse than one with a blank column in it.
+
+## Branding is house standard, except the part that legitimately is not
+
+The branding screen offered "hide what a job does not need — Building on a
+single-building project, for instance", of a setting that reached every job in
+the practice. Either the note was wrong or the setting was in the wrong place.
+
+The setting was in the wrong place, but only partly: which fields a document
+carries is a decision about a document and two jobs differ, while fonts, colours
+and the logo are exactly what a house standard is for. So `core.branding`
+names the keys a project may answer — `PROJECT_KEYS` — and merges the show/hide
+maps key by key rather than replacing them, so a project hiding Building does
+not silently un-hide everything the practice had hidden. A project is validated
+as a whole branding payload, so it can no more hide a row the workbook reads
+than the organisation can.
+
+Three states per field, not two. A project that stored a plain boolean would
+freeze its answer at whatever the house standard said the day somebody opened
+the screen, and stop tracking the practice without being asked to.
+
+## The database left the source folder
+
+`SCHEDUL_DATA` defaulted to `./data`, relative to wherever the server was
+started — which is inside the checkout. Updating by pulling was fine. Updating
+the way most people update a tool they downloaded — fetch the new zip, unpack it
+somewhere else, run it — left the equipment library, the projects and the
+branding in the old folder and came up looking like a first run. Nothing was
+deleted and there was nowhere to go and look, which from where the user is
+standing is the same thing.
+
+The default is now the per-user data directory every other desktop application
+uses, and a database in the old location is copied up to it once on first start.
+Copied rather than moved: a migration that goes wrong should leave the original
+where it was. Settings shows the path and hands out a backup taken through
+SQLite's own backup API — a plain file copy of a database being written to is one
+that may not open, and a backup nobody can restore is worse than none for what
+it is believed to be.
+
+## A spreadsheet's fill handle, and a header row you can copy
+
+Two things people already know how to do that the tool made them learn again.
+
+Dragging a reference down is the single most common act on a schedule, and it
+needed finding a Fill series button in a toolbar. The selection now carries the
+corner handle: series by default where the value ends in digits, Ctrl to copy,
+upwards to count down, and a chip afterwards offering the other one. The rule
+itself stays in `core/references.py`; the browser sends a direction and a count.
+
+Getting a supplier's range into the library meant pasting a block into a
+textarea and mapping columns you had not seen yet. The library now hands out the
+spreadsheet with the headings already on it, and reads the filled-in file back
+through the planner the paste importer already uses. One renderer for the blank
+template, one type's export and the whole library, because two would eventually
+disagree about the headings and the file that came back would stop matching the
+file that went out.
