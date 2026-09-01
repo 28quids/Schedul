@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ...core.branding import (
     COVER_FIELDS, REVISION_FIELDS, SAFE_FONTS, Branding, validate_branding,
 )
-from ...core.house import HouseStandard
+from ...core.house import DEFAULT_GENERAL_NOTES, HouseStandard
 from ...core.naming import NamingScheme
 from ...db.models import HouseStandardRow, Organisation
 from ...services import impact as impact_svc
@@ -40,6 +40,13 @@ def read_settings(
         "house_standard": house.to_dict(),
         "naming_problems": scheme.validate(),
         "pattern_tokens": scheme.pattern_tokens,
+        # What a fresh practice starts with, so a screen that has emptied its
+        # notes has somewhere to get them back from. Stored notes and the
+        # built-in wording are different things, and once the stored list is an
+        # empty one the defaults never reappear on their own -- deliberately, as
+        # "we print no notes" is a real answer -- so the way back has to be an
+        # offer rather than a fallback.
+        "default_general_notes": list(DEFAULT_GENERAL_NOTES),
     }
 
 

@@ -233,7 +233,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-545 tests. The ones worth knowing about:
+549 tests. The ones worth knowing about:
 
 - **`test_formula.py`** — Excel's semantics where they differ from Python's,
   including `-2^2 = 4`, and that emitted Excel re-parses to the same value.
@@ -251,8 +251,9 @@ pytest
   something a user is about to confirm on our word.
 - **`test_branding.py`** — a field the workbook reads cannot be hidden, and the
   issue theme and the editor theme hold the same numbers.
-- **`test_frontend.py`** — runs the grid's selection and keyboard rules under
-  Node. Skips itself when Node is not installed.
+- **`test_frontend.py`** — runs the grid's selection and keyboard rules, and
+  `el()`'s property-versus-attribute rule, under Node. Skips itself when Node is
+  not installed.
 - **`test_columns.py`** — a schedule hiding a column on one target and not
   another, and the two things it is refused: the lookup key, and a column a
   formula reads.

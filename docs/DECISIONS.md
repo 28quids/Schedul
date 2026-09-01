@@ -522,3 +522,33 @@ through the planner the paste importer already uses. One renderer for the blank
 template, one type's export and the whole library, because two would eventually
 disagree about the headings and the file that came back would stop matching the
 file that went out.
+
+## A textarea has no value attribute, and four notes boxes were empty
+
+`el()` decided between setting a property and setting an attribute by asking
+whether the value was a string: strings became attributes, so they show in the
+DOM and can be styled. That is right for an `<input>`, whose `value` attribute
+is real, and wrong for a `<textarea>`, whose value is its text content and which
+has no `value` attribute at all. `setAttribute('value', ...)` on one writes
+something the browser reads back to nobody.
+
+Every notes box in the app was built that way — the house standard's, a
+project's, a schedule's own, and an equipment type's in the designer — so all
+four came up blank over notes that were really there. Blank would have been
+merely confusing; the Save button beside each of them then wrote the emptiness
+back, which is how a practice lost the five notes its schedules print while the
+schedules kept printing them and the screen kept saying they were editable here.
+
+Fixed in `el()` rather than at the four call sites, because the next textarea
+somebody adds would have had the same bug. `textarea()` now exists beside
+`input()` so the question does not come up again, and
+`frontend/tests/dom.test.mjs` asserts the rule both ways — a textarea's value is
+a property, an input's is still an attribute — against a DOM stand-in small
+enough to need no dependency.
+
+Emptying the notes is still allowed to mean what it says, because a practice
+that prints none is a real practice. What was missing was the way back: an empty
+stored list is indistinguishable from a deliberate one, so the defaults cannot
+creep back on their own. `/api/settings` therefore hands out the built-in
+wording alongside the stored notes, the screen offers it as a button, and a save
+that would remove every note says so first.

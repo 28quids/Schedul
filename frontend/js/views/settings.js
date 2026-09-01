@@ -5,8 +5,8 @@
 
 import { api } from '../api.js';
 import {
-  button, card, clear, download, el, fail, field, input, mount, notice, pageHead,
-  pill, select, table, toast,
+  button, card, clear, confirmDialog, download, el, fail, field, input, mount,
+  notice, pageHead, pill, select, table, textarea, toast,
 } from '../ui.js';
 import { brandingSection } from './branding.js';
 
@@ -168,10 +168,33 @@ export async function settingsView() {
 
   /* ------------------------------------------------------------ notes --- */
 
-  const notesArea = el('textarea', {
-    rows: 9,
-    value: house.general_notes.join('\n'),
-  });
+  const notesArea = textarea(house.general_notes.join('\n'), { rows: 9 });
+
+  const saveNotes = async () => {
+    const lines = notesArea.value.split('\n').map((l) => l.trim()).filter(Boolean);
+    // Saving away every note is a real answer — a practice may print none — but
+    // it is also what an empty box does by accident, so it is confirmed rather
+    // than assumed.
+    if (!lines.length && house.general_notes.length) {
+      const ok = await confirmDialog({
+        title: 'Print no notes at all?',
+        message:
+          `The ${house.general_notes.length} note(s) this practice prints on every schedule ` +
+          'would be removed. Schedules would carry only what a project adds and what the ' +
+          'equipment type says.',
+        confirmLabel: 'Remove every note',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    try {
+      await api.settings.update({ general_notes: lines });
+      toast('Notes saved', 'ok');
+      settingsView();
+    } catch (error) { fail(error); }
+  };
+
+  const defaults = settings.default_general_notes || [];
 
   add('content', card(
     'General notes',
@@ -181,21 +204,29 @@ export async function settingsView() {
         'anything a project adds and before anything specific to the equipment type. A ' +
         'single schedule can still take its notes over if it has to say something else.',
       ]),
+      house.general_notes.length
+        ? null
+        : notice(
+            'This practice currently prints no general notes, so schedules carry only what ' +
+            'a project adds and what the equipment type says.',
+            'warn'
+          ),
       notesArea,
     ]),
-    [button('Save notes', {
-      class: 'btn btn-primary',
-      on: {
-        click: async () => {
-          try {
-            await api.settings.update({
-              general_notes: notesArea.value.split('\n').map((l) => l.trim()).filter(Boolean),
-            });
-            toast('Notes saved', 'ok');
-          } catch (error) { fail(error); }
-        },
-      },
-    })]
+    [
+      defaults.length
+        ? button('Restore the built-in notes', {
+            title: 'Put the wording a fresh practice starts with back in the box',
+            on: {
+              click: () => {
+                notesArea.value = defaults.join('\n');
+                toast('Built-in notes put back in the box — save to keep them', 'ok');
+              },
+            },
+          })
+        : null,
+      button('Save notes', { class: 'btn btn-primary', on: { click: saveNotes } }),
+    ]
   ));
 
   /* ------------------------------------------------------- constants --- */

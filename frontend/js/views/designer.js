@@ -18,7 +18,7 @@ import { api } from '../api.js';
 import { go } from '../app.js';
 import {
   button, card, clear, confirmDialog, debounce, el, empty, fail, field, input, modal,
-  mount, notice, pageHead, pill, select, show, table, toast,
+  mount, notice, pageHead, pill, select, show, table, textarea, toast,
 } from '../ui.js';
 
 let d = null;
@@ -661,8 +661,8 @@ function notesCard() {
     d.notes.forEach((note, i) => {
       list.appendChild(el('div', { class: 'note-row' }, [
         el('span', { class: 'muted tiny', text: `[${d.projectNotes.length + i + 1}]` }),
-        el('textarea', {
-          rows: 2, value: note,
+        textarea(note, {
+          rows: 2,
           on: { input: (e) => { d.notes[i] = e.target.value; } },
         }),
         el('button', {

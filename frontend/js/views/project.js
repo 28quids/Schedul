@@ -8,7 +8,7 @@ import { api } from '../api.js';
 import { go, refresh, setContext, store } from '../app.js';
 import {
   button, card, clear, confirmDialog, download, el, empty, fail, field, formatDate,
-  input, modal, mount, notice, pageHead, pill, select, show, table, toast,
+  input, modal, mount, notice, pageHead, pill, select, show, table, textarea, toast,
 } from '../ui.js';
 
 let state = { project: null, buildingId: null, tab: 'schedules', query: '' };
@@ -798,9 +798,8 @@ function drawSetup(root) {
   ));
 
   // The middle notes layer: under the practice's, above the equipment type's.
-  const notesArea = el('textarea', {
+  const notesArea = textarea((p.notes || []).join('\n'), {
     rows: 6,
-    value: (p.notes || []).join('\n'),
     placeholder: 'One per line. Left blank, this job adds nothing of its own.',
   });
 

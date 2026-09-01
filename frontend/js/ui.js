@@ -13,6 +13,13 @@ export function el(tag, attrs = {}, children = []) {
       for (const [event, handler] of Object.entries(value)) node.addEventListener(event, handler);
     } else if (key === 'dataset') {
       Object.assign(node.dataset, value);
+    } else if (node.tagName === 'TEXTAREA' && key === 'value') {
+      // A textarea's value is its text content, not an attribute. HTML has no
+      // `value` attribute on one at all, so `setAttribute('value', ...)` writes
+      // something the browser silently ignores and the box comes up empty. That
+      // is what emptied every notes box in the app, and worse, a Save then wrote
+      // the emptiness back over what was really there.
+      node.value = value ?? '';
     } else if (key in node && key !== 'list' && typeof value !== 'string') {
       node[key] = value;
     } else {
@@ -56,6 +63,18 @@ export function field(label, control, help) {
 
 export function input(value, attrs = {}) {
   return el('input', { type: 'text', value: value ?? '', ...attrs });
+}
+
+/**
+ * A multi-line box, with its content set the way a textarea actually takes it.
+ *
+ * Exists so nobody has to remember that one: `input()` has a counterpart, and
+ * every notes box in the app goes through it.
+ */
+export function textarea(value, attrs = {}) {
+  const node = el('textarea', { rows: 6, ...attrs });
+  node.value = value ?? '';
+  return node;
 }
 
 export function select(options, value, attrs = {}) {

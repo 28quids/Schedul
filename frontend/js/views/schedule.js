@@ -25,7 +25,7 @@ import { go, setContext, store } from '../app.js';
 import {
   anchoredList, button, card, clear, confirmDialog, debounce, download, el, empty,
   fail, field, formatDate, input, modal, mount, notice, pageHead, pill, select, show,
-  table, toast, toolbar,
+  table, textarea, toast, toolbar,
 } from '../ui.js';
 import {
   bounds, cellSelection, cells as selectedCells, clampTo, columns as selectedColumns,
@@ -2324,8 +2324,8 @@ function scheduleNotesEditor(notes) {
     draft.forEach((note, index) => {
       list.appendChild(el('div', { class: 'note-row' }, [
         el('span', { class: 'muted tiny', text: `[${index + 1}]` }),
-        el('textarea', {
-          rows: 2, value: note,
+        textarea(note, {
+          rows: 2,
           on: { input: (e) => { draft[index] = e.target.value; } },
         }),
         el('button', {
