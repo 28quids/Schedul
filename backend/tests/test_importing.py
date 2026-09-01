@@ -229,3 +229,164 @@ class TestGridEntry:
         assert response.status_code == 400
         assert "row(s) 2" in response.json()["detail"]
         assert library(client) == {}, "nothing is saved when the batch is refused"
+
+
+class TestTheLibraryWorkbook:
+    """Out as a spreadsheet, filled in, and back again.
+
+    The paste importer asks somebody to know which column is which before they
+    have seen the columns. This is the route that does not: hand them the file
+    with the headings on it. What comes back has to go through the same planner
+    a paste does, or the two would drift apart in what they accept.
+    """
+
+    @pytest.fixture()
+    def client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("SCHEDUL_DATABASE_URL", f"sqlite:///{tmp_path / 'wb.db'}")
+        import schedul.db.session as session_module
+
+        session_module.SessionLocal = None
+        session_module.init_db(f"sqlite:///{tmp_path / 'wb.db'}")
+        from schedul.api.main import app
+
+        return TestClient(app)
+
+    @staticmethod
+    def _book(content):
+        import io
+
+        from openpyxl import load_workbook
+
+        return load_workbook(io.BytesIO(content))
+
+    @staticmethod
+    def _post(client, content, **data):
+        return client.post(
+            "/api/library/workbook/import",
+            files={"file": ("library.xlsx", content, "application/octet-stream")},
+            data={"apply": "false", **data},
+        )
+
+    def test_every_type_gets_a_sheet_named_after_its_code(self, client):
+        book = self._book(client.get("/api/library/workbook.xlsx").content)
+        codes = {t["code"] for t in client.get("/api/catalogue").json()}
+        assert codes <= set(book.sheetnames)
+
+    def test_the_headings_are_the_lookup_key_then_the_library_fields(self, client):
+        book = self._book(client.get("/api/library/workbook.xlsx?code=MVHR").content)
+        sheet = book["MVHR"]
+        headings = [sheet.cell(1, c).value for c in range(1, 30) if sheet.cell(1, c).value]
+        assert headings[0] == "Model Reference"
+        assert "Manufacturer" in headings
+        assert "Unit Reference" not in headings, (
+            "an input column differs per unit, so it would be a stale copy in the library"
+        )
+
+    def test_the_blank_template_carries_an_example_that_imports_as_nothing(self, client):
+        template = client.get("/api/library/workbook.xlsx?code=MVHR&data=false").content
+        plan = self._post(client, template).json()
+        assert plan["counts"]["create"] == 0
+        assert not plan["can_apply"], (
+            "importing the template unedited must add nothing, example row included"
+        )
+
+    def test_an_export_comes_back_as_no_change_at_all(self, client):
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Width (mm)": 900},
+        })
+        exported = client.get("/api/library/workbook.xlsx?code=MVHR").content
+        plan = self._post(client, exported).json()
+        assert plan["counts"]["unchanged"] == 1
+        assert plan["counts"]["create"] == 0 and plan["counts"]["update"] == 0
+
+    def test_a_corrected_workbook_updates_and_adds(self, client):
+        import io
+
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Width (mm)": 900},
+        })
+        book = self._book(client.get("/api/library/workbook.xlsx?code=MVHR").content)
+        sheet = book["MVHR"]
+        width = next(c for c in range(1, 30) if sheet.cell(1, c).value == "Width (mm)")
+        sheet.cell(2, width, 950)
+        sheet.cell(3, 1, "SYS-VSR-700")
+        sheet.cell(3, width, 1100)
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        plan = self._post(client, buffer.getvalue()).json()
+        assert plan["counts"] == {"create": 1, "update": 1, "unchanged": 0, "skip": 0}
+        assert plan["destructive"], "changing a stored value has to be confirmed"
+
+        applied = self._post(client, buffer.getvalue(), apply="true").json()
+        assert applied["applied"] == 2
+        entries = {
+            e["model_reference"]: e["values"] for e in client.get("/api/library/MVHR").json()
+        }
+        assert entries["SYS-VSR-500"]["Width (mm)"] == 950
+        assert entries["SYS-VSR-700"]["Width (mm)"] == 1100
+
+    def test_a_blank_cell_still_means_not_stated(self, client):
+        import io
+
+        client.post("/api/library", json={
+            "type_code": "MVHR", "model_reference": "SYS-VSR-500",
+            "values": {"Manufacturer": "Systemair", "Width (mm)": 900},
+        })
+        book = self._book(client.get("/api/library/workbook.xlsx?code=MVHR").content)
+        sheet = book["MVHR"]
+        width = next(c for c in range(1, 30) if sheet.cell(1, c).value == "Width (mm)")
+        sheet.cell(2, width, None)
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        self._post(client, buffer.getvalue(), apply="true")
+        entry = client.get("/api/library/MVHR").json()[0]
+        assert entry["values"]["Width (mm)"] == 900, (
+            "an emptied cell means 'not stated here', never 'delete what you know'"
+        )
+
+    def test_the_same_reference_twice_is_one_product(self, client):
+        import io
+
+        book = self._book(
+            client.get("/api/library/workbook.xlsx?code=MVHR&data=false").content
+        )
+        sheet = book["MVHR"]
+        for row in (2, 3):
+            sheet.cell(row, 1, "SYS-VSR-500")
+            sheet.cell(row, 2, "Systemair")
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        plan = self._post(client, buffer.getvalue()).json()
+        actions = [r["action"] for r in plan["sheets"][0]["rows"]]
+        assert actions.count("create") == 1
+        assert "skip" in actions
+
+    def test_a_sheet_naming_no_type_is_reported_not_guessed_at(self, client):
+        import io
+
+        book = self._book(
+            client.get("/api/library/workbook.xlsx?code=MVHR&data=false").content
+        )
+        book["MVHR"].title = "Radiators maybe"
+        buffer = io.BytesIO()
+        book.save(buffer)
+
+        plan = self._post(client, buffer.getvalue()).json()
+        assert plan["sheets"][0]["recognised"] is False
+        assert "no schedule type" in plan["sheets"][0]["message"]
+
+    def test_something_that_is_not_a_workbook_is_refused_plainly(self, client):
+        response = client.post(
+            "/api/library/workbook/import",
+            files={"file": ("notes.txt", b"hello", "text/plain")},
+            data={"apply": "false"},
+        )
+        assert response.status_code == 400
+        assert "Excel workbook" in response.text

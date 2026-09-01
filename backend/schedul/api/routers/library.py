@@ -1,12 +1,28 @@
-"""The shared equipment library and its review queue."""
+"""The shared equipment library, its review queue, and the workbook round trip.
+
+Products get in three ways, and all three end at the same planner: typed on a
+schedule, pasted as a block, or filled into the workbook this hands out. The
+workbook is the one that scales -- a practice can take the whole library out,
+one sheet per type, correct it where correcting a hundred rows is a drag of the
+fill handle, and bring it back.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import io
+import tempfile
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...core.catalogue import ScheduleType
 from ...db.models import Equipment, Organisation, ScheduleTypeRow
+from ...export.library import (
+    library_columns, read_library_workbook, render_library_workbook,
+)
 from ...services import importing as imp
 from ...services import library as lib
 from ...services.converters import type_from_row
@@ -15,6 +31,46 @@ from ..deps import current_org, get_db, not_found
 from ..schemas import BulkEquipmentIn, EquipmentIn, EquipmentOut, LibraryImportIn
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _types(session: Session, org: Organisation) -> list[ScheduleType]:
+    """Every live type in this organisation, in code order."""
+    rows = session.scalars(
+        select(ScheduleTypeRow).where(
+            ScheduleTypeRow.organisation_id == org.id,
+            ScheduleTypeRow.archived.is_(False),
+        )
+    )
+    return sorted((type_from_row(r) for r in rows), key=lambda t: t.code)
+
+
+def _products_for(
+    session: Session, org: Organisation, schedule_type: ScheduleType
+) -> list[dict[str, object]]:
+    """One type's entries, shaped as the workbook's rows.
+
+    Rejected entries are left out. They are still in the record for the sake of
+    a schedule that referenced one, but a file somebody is about to correct and
+    send back should not carry rows the practice has already decided against.
+    """
+    columns = library_columns(schedule_type)
+    entries = session.scalars(
+        select(Equipment).where(
+            Equipment.organisation_id == org.id,
+            Equipment.type_code == schedule_type.code,
+            Equipment.review_state != "rejected",
+        )
+    )
+    out = []
+    for entry in sorted(entries, key=lambda e: e.model_reference.lower()):
+        values = entry.values or {}
+        row: dict[str, object] = {"Model Reference": entry.model_reference}
+        for key in columns[1:]:
+            row[key] = values.get(key)
+        out.append(row)
+    return out
 
 
 def _type(session: Session, org: Organisation, code: str):
@@ -44,6 +100,135 @@ def _view(entry: Equipment) -> EquipmentOut:
             if not f.resolved
         ],
     )
+
+
+# ------------------------------------------------------------- workbooks ---
+#
+# Declared above ``/{type_code}``: a path parameter would otherwise swallow
+# ``workbook.xlsx`` and try to look up a schedule type called that.
+
+
+@router.get("/workbook.xlsx")
+def export_workbook(
+    code: str = "",
+    data: bool = True,
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> FileResponse:
+    """The library as a workbook: one sheet per type, headings on row 1.
+
+    ``code`` narrows it to one type; ``data=false`` gives the same file with
+    nothing in it, which is the blank template. It is deliberately one endpoint
+    and one renderer -- a separate template generator would eventually disagree
+    with the exporter about the headings, and the file that came back would stop
+    matching the file that went out.
+    """
+    types = _types(session, org)
+    if code:
+        wanted = code.strip().upper()
+        types = [t for t in types if t.code == wanted]
+        if not types:
+            raise not_found(f"schedule type {code!r}")
+    if not types:
+        raise HTTPException(
+            status_code=400, detail="this organisation has no schedule types yet"
+        )
+
+    products = (
+        {t.code: _products_for(session, org, t) for t in types} if data else {}
+    )
+    stem = (
+        f"{types[0].code}_library" if len(types) == 1 else "equipment_library"
+    )
+    name = f"{stem}{'' if data else '_template'}.xlsx"
+    tmp = Path(tempfile.mkdtemp(prefix="schedul-lib-"))
+    path = render_library_workbook(types, products, tmp / name)
+    return FileResponse(path, filename=name, media_type=XLSX_MEDIA)
+
+
+@router.post("/workbook/import")
+async def import_workbook(
+    file: UploadFile = File(...),
+    apply: bool = Form(False),
+    update_existing: bool = Form(True),
+    created_by: str = Form(""),
+    session: Session = Depends(get_db),
+    org: Organisation = Depends(current_org),
+) -> dict[str, object]:
+    """Read a filled-in workbook back, a sheet at a time.
+
+    Every sheet goes through the same planner a pasted block does, so duplicate
+    handling, the "a blank cell means not stated" rule and the plan-before-it-
+    happens guarantee are the ones that already exist rather than a second set
+    written for files. Without ``apply`` nothing is written.
+
+    A sheet whose name does not match a schedule type is reported rather than
+    guessed at: importing a hundred radiators into the fan coil library because
+    somebody renamed a tab is not a recoverable mistake.
+    """
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(
+            status_code=400,
+            detail="that is not an Excel workbook. Save it as .xlsx and try again.",
+        )
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="the file is empty")
+
+    try:
+        blocks = read_library_workbook(io.BytesIO(raw))
+    except Exception as exc:  # a corrupt or password-protected file
+        raise HTTPException(
+            status_code=400, detail=f"that workbook could not be read: {exc}"
+        ) from exc
+
+    known = {t.code: t for t in _types(session, org)}
+    sheets: list[dict[str, object]] = []
+    total = {"create": 0, "update": 0, "unchanged": 0, "skip": 0}
+    applied = 0
+
+    for block in blocks:
+        stype = known.get(str(block["code"]))
+        if stype is None:
+            sheets.append(
+                {
+                    "sheet": block["sheet"],
+                    "type_code": block["code"],
+                    "recognised": False,
+                    "message": (
+                        f"no schedule type called {block['code']!r}, so this sheet "
+                        f"was left alone. Name the tab after the type's code."
+                    ),
+                }
+            )
+            continue
+
+        plan = imp.plan_import(
+            session, org.id, stype, str(block["text"]),
+            header=True,
+            update_existing=update_existing,
+        )
+        if apply and plan.can_apply:
+            imp.apply_import(session, org.id, stype, plan, created_by=created_by)
+            applied += plan.applied
+        for key, value in plan.counts.items():
+            total[key] = total.get(key, 0) + value
+        sheets.append({"sheet": block["sheet"], "recognised": True, **plan.to_dict()})
+
+    if not sheets:
+        raise HTTPException(
+            status_code=400,
+            detail="no sheet in that workbook had a heading row and data under it",
+        )
+
+    return {
+        "applied": applied,
+        "counts": total,
+        "sheets": sheets,
+        "can_apply": any(s.get("can_apply") for s in sheets),
+        "destructive": any(s.get("destructive") for s in sheets),
+    }
 
 
 @router.get("/{type_code}", response_model=list[EquipmentOut])

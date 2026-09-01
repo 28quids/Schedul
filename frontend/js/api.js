@@ -163,6 +163,32 @@ export const api = {
     setState: (id, state) => request('POST', `/api/library/review/${id}/${state}`),
     resolveFlag: (id) => request('POST', `/api/library/review/flags/${id}/resolve`),
     remove: (id) => request('DELETE', `/api/library/${id}`),
+
+    // The workbook round trip. `workbookUrl` is a download rather than a fetch,
+    // so it is a URL rather than a call; the import posts the file back.
+    workbookUrl: (code = '', data = true) => {
+      const params = new URLSearchParams();
+      if (code) params.set('code', code);
+      if (!data) params.set('data', 'false');
+      const query = params.toString();
+      return `/api/library/workbook.xlsx${query ? `?${query}` : ''}`;
+    },
+    importWorkbook: async (file, { apply = false, updateExisting = true } = {}) => {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('apply', apply ? 'true' : 'false');
+      form.append('update_existing', updateExisting ? 'true' : 'false');
+      const response = await fetch('/api/library/workbook/import', {
+        method: 'POST', body: form,
+      });
+      const text = await response.text();
+      let payload = null;
+      if (text) { try { payload = JSON.parse(text); } catch { payload = text; } }
+      if (!response.ok) {
+        throw new ApiError(describe(payload, response.status), response.status, payload);
+      }
+      return payload;
+    },
   },
 
   impact: (area = '') => request('GET', `/api/impact${area ? `?area=${area}` : ''}`),

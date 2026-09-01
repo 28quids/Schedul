@@ -8,10 +8,10 @@
 import { api } from '../api.js';
 import { store } from '../app.js';
 import {
-  button, card, clear, confirmDialog, el, empty, fail, field, formatDate, input,
-  modal, mount, notice, pill, select, show, table, toast,
+  button, card, clear, confirmDialog, download, el, empty, fail, field, formatDate,
+  input, modal, mount, notice, pill, select, show, table, toast,
 } from '../ui.js';
-import { importProducts, productGrid } from './library-entry.js';
+import { importProducts, importWorkbook, productGrid } from './library-entry.js';
 
 const TONE = { CONFLICT: 'red', DRIFT: 'amber', INCOMPLETE: 'quiet', NEW: 'blue' };
 
@@ -29,6 +29,23 @@ export async function libraryView() {
         el('div', {
           class: 'sub',
           text: 'Every product this practice has scheduled. Entered once, then available on every schedule.',
+        }),
+      ]),
+      // The whole-library round trip: everything out as one workbook, a sheet
+      // per type, corrected in Excel and brought back.
+      el('div', { class: 'btn-row' }, [
+        button('Blank workbook', {
+          title: 'Every type’s headings and an example row, ready to fill in',
+          on: { click: () => download(api.library.workbookUrl('', false)) },
+        }),
+        button('Export all', {
+          title: 'The whole library as one workbook, a sheet per equipment type',
+          on: { click: () => download(api.library.workbookUrl('', true)) },
+        }),
+        button('Import workbook…', {
+          class: 'btn btn-primary',
+          title: 'Read a filled-in workbook back, a sheet at a time',
+          on: { click: async () => { if (await importWorkbook()) libraryView(); } },
         }),
       ]),
     ]),
@@ -140,8 +157,12 @@ async function drawBrowse(root, types) {
         el('div', { style: 'flex:1;min-width:200px' }, [search]),
       ]),
       el('div', { class: 'btn-row' }, [
+        button(`Export ${state.code}`, {
+          title: 'This type as a workbook, with the headings on row 1, ready to edit and bring back',
+          on: { click: () => download(api.library.workbookUrl(state.code, true)) },
+        }),
         button('Import…', {
-          title: 'Paste a supplier’s product list, map the columns, and see what it would do',
+          title: 'Paste a supplier’s product list, or fill in the blank workbook and bring it back',
           on: {
             click: async () => {
               if (await importProducts(state.code)) libraryView();
