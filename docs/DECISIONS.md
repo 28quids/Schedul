@@ -552,3 +552,60 @@ stored list is indistinguishable from a deliberate one, so the defaults cannot
 creep back on their own. `/api/settings` therefore hands out the built-in
 wording alongside the stored notes, the screen offers it as a button, and a save
 that would remove every note says so first.
+
+## Suggestions are read out of the schedule, never imposed on it
+
+The grid offers three things now, and the rule behind all of them is the same:
+the answer comes from what the schedule already says, not from a convention this
+code holds.
+
+`MVHR-001` on the ground floor and `MVHR-101` on the first is one practice's
+numbering among many, and hardcoding it — or any of the alternatives — would be
+right for one firm and wrong for the rest. So `core/references.next_in_column`
+only ever reads the pattern: two values say which number moves and by how much,
+one says the last run does, and none says nothing. A practice that numbers its
+units another way gets its own way back for free, and there is no setting to get
+wrong.
+
+The same rule decides which number a fill counts. `RM0.01 2 Bedroom` could count
+rooms or beds; one seed cannot say, so the last run wins, which is the
+spreadsheet rule. Two seeds can say, and then they decide. Where neither
+settles it, the chip after the fill asks rather than the code guessing.
+
+The group offer — "the other four Cupboards have no airflow" — is deliberately
+the narrowest of the three, because it is the only one that writes to cells
+nobody is looking at. Empty cells only, two or more matching rows, the grouping
+column that matches most, and once. A wrong bulk edit costs far more than the
+typing it saves, and a suggestion that keeps coming back after being turned down
+stops being help.
+
+None of them commit anything. The inline completion arrives selected so typing
+replaces it, the next reference is a placeholder until Tab takes it, and the
+group offer is a button. That is what makes it safe for any of them to be wrong.
+
+## Two things that made the grid feel broken
+
+Neither was in the grid's logic.
+
+**Every toolbar button ignored its first click.** Clicking one with the caret in
+a cell blurs the cell, the blur saves, the save moves the selection, and the
+selection rebuilt the toolbar — replacing the button between the mousedown and
+the mouseup, so the click landed on a node that was no longer in the document.
+The toolbar is now built once per redraw and mutated in place. The general
+lesson is worth keeping: a node rebuilt in response to state cannot be a node
+somebody is in the middle of clicking.
+
+**Typing a reference and pressing Enter put it on the wrong line.** Typing
+schedules a save 500ms out; adding a row redraws immediately. The redraw
+rebuilt the cell from a row the server had not been told about yet. Every
+structural change now settles the pending saves before it runs.
+
+## The caret is not the selection's focus
+
+Enter walking a selected block needed a distinction the selection model did not
+have. A selection is anchor-to-focus, so moving the focus to walk the block
+would shrink the very rectangle being walked. `activeCell` is now a separate
+thing carried alongside, and extending a selection leaves it where the typing
+was — Shift+Down from the top of a column selects it and leaves you in the top
+cell, as a spreadsheet does, so Enter then starts at the top rather than the
+bottom.

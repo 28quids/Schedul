@@ -33,6 +33,7 @@ import {
   selectRows, size, step, withActive,
 } from '../grid/selection.js';
 import { decide } from '../grid/keys.js';
+import { productGrid } from './library-entry.js';
 import { parseTsv, planBlockPaste, selectionMatrix, toTsv } from '../grid/clipboard.js';
 
 let view = null;
@@ -2254,10 +2255,40 @@ async function captureProduct(row, reference) {
     ]),
     actions: (close) => [
       button('Cancel', { on: { click: () => close(false) } }),
+      // One product is a form; a manufacturer's range is a table. The library
+      // screen already has the table, so this is a door to it rather than a
+      // second one written here — a range entered from a schedule and a range
+      // entered from the library page must not be two different experiences.
+      button('Add several…', {
+        title: 'The same table the Equipment page uses, for a whole range at once',
+        on: { click: () => close('grid') },
+      }),
       button('Save to library', { class: 'btn btn-primary', on: { click: () => close(true) } }),
     ],
   });
   if (!ok) return;
+
+  if (ok === 'grid') {
+    const seed = {
+      'Model Reference': reference,
+      ...Object.fromEntries(
+        Object.entries(inputs).map(([key, node]) => [key, node.value])
+      ),
+    };
+    const saved = await productGrid(
+      view.grid.schedule.code,
+      columns.map((c) => ({ name: c.name, unit: c.unit })),
+      { seed: [seed] }
+    );
+    if (!saved) return;
+    row.values['Model Reference'] = reference;
+    const entry = cellIndex.get(cellKey(row.id, 'Model Reference'));
+    const box = entry && entry.td.querySelector('input');
+    if (box) box.value = reference;
+    await flushRow(row);
+    toast(`${saved} product(s) saved to the library`, 'ok');
+    return;
+  }
 
   try {
     await api.library.save({

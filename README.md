@@ -132,6 +132,29 @@ of values — so a drag, the toolbar button and an importer all agree.
 Library cells can be taken over and put back a **selection at a time**: a row
 that diverges from the library usually diverges in company.
 
+Enter and Tab walk a selected block — across the row, then down to the start of
+the next — so filling in a chosen rectangle is typing and Enter, without
+steering. Copying one cell and pasting into a range fills the range, as a
+spreadsheet does.
+
+### What the grid already knows
+
+Three offers, all read out of the schedule rather than imposed on it:
+
+- typing `Cu` in a column that already says Cupboard **completes it inline**,
+  and only when exactly one value matches — two candidates would make it a
+  guess;
+- adding a row under `MVHR-005` **offers `MVHR-006`** as a ghost, taken with Tab
+  or Enter. What "next" means comes from the column, so a practice that starts
+  the first floor at `MVHR-101` gets `MVHR-102` offered next;
+- filling in the airflow on one of five Cupboards **offers to set the other
+  four** — empty cells only, two or more matching rows, and once.
+
+A schedule also goes out as a spreadsheet and comes back (`Excel…` on the
+toolbar): the typed columns with the headings on row 1, read back through the
+same paste planner the browser uses. That is the working file; `export.xlsx` is
+still the deliverable.
+
 Pasting is planned before it happens. The preview says how many rows were found,
 whether the first line was a header, and what would be appended, inserted or
 removed; replacing every row is refused unless it is confirmed, and only when
@@ -233,7 +256,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-549 tests. The ones worth knowing about:
+591 tests. The ones worth knowing about:
 
 - **`test_formula.py`** — Excel's semantics where they differ from Python's,
   including `-2^2 = 4`, and that emitted Excel re-parses to the same value.
@@ -261,6 +284,8 @@ pytest
   comes back as no change at all, and a blank template that imports as nothing.
 - **`test_storage.py`** — the database is never inside the checkout, an older
   one is adopted rather than overwritten, and a backup is a database that opens.
+- **`test_references.py`** — which number in a value a fill counts, and what a
+  column offers as the next reference down it.
 
 Tests needing LibreOffice skip themselves when it is not installed, as do the
 front-end ones when Node is not.

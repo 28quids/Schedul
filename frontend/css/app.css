@@ -706,3 +706,21 @@ table.headings td { white-space: nowrap; }
    has to say what it would do before it does it. */
 .group-chip { max-width: 420px; gap: 10px; }
 .group-chip .tiny { color: var(--grey-700); }
+
+/* ------------------------------------------------------- the library table --- */
+
+.library-filters {
+  display: flex; gap: 10px; flex: 1; flex-wrap: wrap; align-items: center;
+}
+.library-filters select { flex: 0 0 auto; min-width: 220px; max-width: 320px; }
+.library-filters input[type="text"] { flex: 1; min-width: 200px; }
+.library-filters label { display: flex; gap: 5px; align-items: center; color: var(--grey-600); }
+
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--blue-dark); }
+th.sorted { color: var(--blue-dark); }
+.sort-arrow { font-size: 9px; }
+
+/* An entry that looks like the same product entered twice. Marked rather than
+   hidden: which of the two is the real one is not ours to decide. */
+tr.suspect td { background: var(--amber-wash); }
