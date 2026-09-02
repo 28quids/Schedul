@@ -609,3 +609,29 @@ thing carried alongside, and extending a selection leaves it where the typing
 was — Shift+Down from the top of a column selects it and leaves you in the top
 cell, as a spreadsheet does, so Enter then starts at the top rather than the
 bottom.
+
+## "file is not a database" is a true error and a useless one
+
+Somebody moving their data between two downloads copied the `.db` by opening
+both in a text editor and pasting across. A `.db` is binary; a text editor
+re-encodes every byte and rewrites the line endings, so what landed was the
+right sort of size and completely unreadable. The server's answer was
+`sqlite3.DatabaseError: file is not a database` at the foot of fifty frames of
+SQLAlchemy, naming neither the file nor the cause nor anything to do about it.
+
+Two changes, and the second is the one that matters.
+
+`check_database` runs before anything opens the file: the sixteen-byte SQLite
+header first, then a read of `sqlite_master`, because a text-editor copy can
+keep the header and lose everything after it. It returns a sentence naming the
+path, the likely cause and the fix, and startup prints that instead of the
+traceback. It is deliberately fatal rather than falling back to a fresh
+database: coming up empty with an unreadable file beside it looks exactly like
+every project having been deleted.
+
+And the copy became a command. `python -m schedul.dbtool restore <file>`
+validates the source, moves anything already in place aside rather than over,
+and prints what it restored — one project, forty schedules, two hundred library
+entries — so a restore can be checked rather than believed. Telling somebody
+not to use a text editor is worth doing; giving them something else to use is
+worth more.

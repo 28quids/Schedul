@@ -125,3 +125,139 @@ class TestTheSettingsScreenCanSayWhereItIs:
                 )
             ]
         assert references == ["SYS-VSR-500"]
+
+
+class TestAFileThatIsNotADatabase:
+    """The failure somebody actually hits when they move their data by hand.
+
+    A ``.db`` is binary. Opened in a text editor and pasted somewhere it comes
+    out the right sort of size and completely unreadable, and SQLAlchemy's own
+    answer -- "file is not a database", at the foot of fifty frames -- names
+    neither the file nor the cause.
+    """
+
+    @staticmethod
+    def _real_database(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE project (id TEXT)")
+            connection.execute("INSERT INTO project VALUES ('one')")
+        return path
+
+    @staticmethod
+    def _text_editor_copy(source, target):
+        """What a text editor does to a binary file: re-encode every byte."""
+        target.write_text(source.read_bytes().decode("latin-1"), encoding="utf-8")
+        return target
+
+    def test_a_good_database_has_nothing_to_say(self, tmp_path):
+        assert db_session.check_database(self._real_database(tmp_path / "ok.db")) is None
+
+    def test_a_missing_file_is_not_a_problem(self, tmp_path):
+        assert db_session.check_database(tmp_path / "nothing.db") is None
+
+    def test_an_empty_file_is_not_a_problem(self, tmp_path):
+        # SQLite makes a database out of an empty file, so a half-finished copy
+        # that produced nothing is not something to refuse to start over.
+        (tmp_path / "empty.db").write_bytes(b"")
+        assert db_session.check_database(tmp_path / "empty.db") is None
+
+    def test_something_that_is_not_a_database_says_so(self, tmp_path):
+        (tmp_path / "notes.db").write_text("pasted out of Notepad")
+        problem = db_session.check_database(tmp_path / "notes.db")
+        assert problem and "is not a database file" in problem
+        assert "text editor" in problem, "the cause, not just the symptom"
+        assert "File Explorer" in problem, "and what to do about it"
+
+    def test_a_text_editor_copy_is_caught(self, tmp_path):
+        good = self._real_database(tmp_path / "good.db")
+        damaged = self._text_editor_copy(good, tmp_path / "damaged.db")
+        problem = db_session.check_database(damaged)
+        assert problem, "a re-encoded copy is the exact case this exists for"
+        assert "text editor" in problem
+
+    def test_startup_refuses_rather_than_beginning_afresh(self, tmp_path, monkeypatch):
+        # Coming up on an empty database with an unreadable one beside it would
+        # look exactly like every project having been deleted.
+        (tmp_path / "schedul.db").write_text("not a database")
+        monkeypatch.delenv("SCHEDUL_DATABASE_URL", raising=False)
+        monkeypatch.setattr(db_session, "DATA_DIR", tmp_path)
+        db_session.SessionLocal = None
+        with pytest.raises(db_session.DatabaseUnreadable) as raised:
+            db_session.init_db()
+        assert "schedul.db" in str(raised.value)
+
+    def test_the_damaged_file_is_left_exactly_as_it_was(self, tmp_path, monkeypatch):
+        (tmp_path / "schedul.db").write_text("not a database")
+        before = (tmp_path / "schedul.db").read_bytes()
+        monkeypatch.delenv("SCHEDUL_DATABASE_URL", raising=False)
+        monkeypatch.setattr(db_session, "DATA_DIR", tmp_path)
+        db_session.SessionLocal = None
+        with pytest.raises(db_session.DatabaseUnreadable):
+            db_session.init_db()
+        assert (tmp_path / "schedul.db").read_bytes() == before
+
+
+class TestMovingTheDatabaseWithoutATextEditor:
+    """``python -m schedul.dbtool``, so the copy is a command rather than a chore."""
+
+    @pytest.fixture()
+    def live(self, tmp_path, monkeypatch):
+        from schedul import dbtool
+
+        monkeypatch.setattr(db_session, "DATA_DIR", tmp_path / "userdata")
+        monkeypatch.setattr(dbtool, "DATA_DIR", tmp_path / "userdata")
+        return dbtool
+
+    def _database(self, path, projects=1):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE project (id TEXT)")
+            for i in range(projects):
+                connection.execute("INSERT INTO project VALUES (?)", (str(i),))
+        return path
+
+    def test_it_puts_a_database_in_place(self, live, tmp_path, capsys):
+        source = self._database(tmp_path / "old" / "schedul.db")
+        target = live.restore(source)
+        assert target.exists()
+        assert db_session.check_database(target) is None
+        assert "1 project" in capsys.readouterr().out, (
+            "a restore says what it restored, so it can be checked rather than believed"
+        )
+
+    def test_it_refuses_a_damaged_file_before_touching_anything(self, live, tmp_path):
+        good = self._database(tmp_path / "userdata" / "schedul.db", projects=3)
+        before = good.read_bytes()
+        (tmp_path / "bad.db").write_text("pasted out of Notepad")
+
+        with pytest.raises(SystemExit) as raised:
+            live.restore(tmp_path / "bad.db")
+        assert "cannot be used" in str(raised.value)
+        assert good.read_bytes() == before, "the live database is untouched"
+
+    def test_what_was_there_is_moved_aside_not_over(self, live, tmp_path):
+        existing = self._database(tmp_path / "userdata" / "schedul.db", projects=7)
+        kept = existing.read_bytes()
+        live.restore(self._database(tmp_path / "old" / "schedul.db", projects=1))
+
+        spares = [p for p in (tmp_path / "userdata").iterdir() if "replaced" in p.name]
+        assert len(spares) == 1, "being wrong about which database is the good one "
+        assert spares[0].read_bytes() == kept, "must not be final"
+
+    def test_a_missing_source_is_said_plainly(self, live, tmp_path):
+        with pytest.raises(SystemExit) as raised:
+            live.restore(tmp_path / "nowhere.db")
+        assert "no file at" in str(raised.value)
+
+    def test_backup_produces_a_database_that_opens(self, live, tmp_path):
+        self._database(tmp_path / "userdata" / "schedul.db", projects=4)
+        copy = live.backup(tmp_path / "backups")
+        assert db_session.check_database(copy) is None
+        with sqlite3.connect(copy) as connection:
+            assert connection.execute("SELECT count(*) FROM project").fetchone()[0] == 4
+
+    def test_where_prints_the_path(self, live, tmp_path, capsys):
+        self._database(tmp_path / "userdata" / "schedul.db")
+        assert live.main(["where"]) == 0
+        assert str(tmp_path / "userdata" / "schedul.db") in capsys.readouterr().out

@@ -56,6 +56,27 @@ path as `schedul.db`.
 OneDrive, Dropbox — is also how two machines share one record, though one at a
 time: SQLite over a sync client does not take concurrent writers.
 
+### Moving a database from an older copy
+
+If your data is still in an older download's `backend\data\schedul.db`, put it
+in place with the command rather than by hand:
+
+```
+python -m schedul.dbtool where                          # the path it will use
+python -m schedul.dbtool restore "C:\old\backend\data\schedul.db"
+python -m schedul.dbtool backup                         # a copy, taken safely
+```
+
+`restore` checks the file really is a database before it touches anything, and
+moves whatever was there aside rather than over.
+
+> **Never copy a `.db` through a text editor.** It is a binary file. Opening one
+> in Notepad and pasting it somewhere re-encodes every byte, and what comes out
+> is the right sort of size and completely unreadable. Copy it in File Explorer
+> or with `copy` at a command prompt. Schedul now checks the file on startup and
+> says so plainly rather than failing with a stack trace, but the damage happens
+> at the copy.
+
 ### PDF export
 
 PDF conversion runs the real `.xlsx` through headless LibreOffice, so pagination,
@@ -256,7 +277,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-591 tests. The ones worth knowing about:
+604 tests. The ones worth knowing about:
 
 - **`test_formula.py`** — Excel's semantics where they differ from Python's,
   including `-2^2 = 4`, and that emitted Excel re-parses to the same value.
@@ -283,7 +304,9 @@ pytest
 - **`test_importing.py`** — the library workbook round trip: an export that
   comes back as no change at all, and a blank template that imports as nothing.
 - **`test_storage.py`** — the database is never inside the checkout, an older
-  one is adopted rather than overwritten, and a backup is a database that opens.
+  one is adopted rather than overwritten, a backup is a database that opens, and
+  a file copied through a text editor is caught and explained rather than
+  crashing the server.
 - **`test_references.py`** — which number in a value a fill counts, and what a
   column offers as the next reference down it.
 

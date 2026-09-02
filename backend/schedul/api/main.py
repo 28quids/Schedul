@@ -7,6 +7,7 @@ is one command and one URL.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -14,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..db.session import DATA_DIR, init_db
+from ..db.session import DATA_DIR, DatabaseUnreadable, init_db
 from .routers import (
     catalogue, exports, impact, library, projects, schedules, settings,
 )
@@ -50,7 +51,25 @@ app.include_router(impact.router)
 
 @app.on_event("startup")
 def _startup() -> None:
-    init_db()
+    try:
+        init_db()
+    except DatabaseUnreadable as problem:
+        # Printed rather than raised through the server's own logging, because
+        # what somebody needs here is the sentence, not the fifty frames of
+        # traceback that would otherwise bury it.
+        print(
+            "\n"
+            "Schedul cannot start: the database cannot be read.\n"
+            "-------------------------------------------------\n"
+            f"{problem}\n"
+            "-------------------------------------------------\n"
+            "Nothing has been changed or deleted. Move the damaged file aside "
+            "and Schedul will start with an empty database, or use\n"
+            "    python -m schedul.dbtool restore <path to a good .db>\n"
+            "to put one in place safely.\n",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from problem
     log.info("database ready at %s", DATA_DIR)
 
 
